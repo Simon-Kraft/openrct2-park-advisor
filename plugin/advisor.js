@@ -14,7 +14,7 @@ var RETRY_MS = 5000;      // listener retry delay when the port is busy
 var PROTOCOL = 1;
 
 var HELP = "Park Advisor: !ask <question> asks the advisor about the park. " +
-    "!reset forgets your conversation. !ping checks the bot. !help shows this.";
+    "!reset forgets your conversation. !ping checks the bot. !tool <name> shows raw park data. !help shows this.";
 
 var listener = null;
 var conn = null;
@@ -82,6 +82,228 @@ function dropConn() {
     }
 }
 
+// ---------------------------------------------------------------- tools
+// Read-only. Units are converted here, so the helper and the LLM only ever see
+// currency amounts, real ratings and 0-100 percentages.
+
+var MONTHS = ["March", "April", "May", "June", "July", "August", "September", "October"];
+var INSPECTION = ["10 min", "20 min", "30 min", "45 min", "60 min", "120 min", "never"];
+
+// Internal money is 1/10 of a pound (Money.hpp); GBP, USD, EUR and others share that rate.
+// kMoney64Undefined (INT64_MIN) means "unknown".
+function money(v) {
+    if (typeof v !== "number" || v <= -9.2e18) return null;
+    return Math.round(v) / 10;
+}
+
+// Ratings are fixed-point x100; unrated rides hold 0xFFFF, which reads as -1.
+function rating(v) {
+    return typeof v === "number" && v >= 0 && v < 0xFFFF ? Math.round(v) / 100 : null;
+}
+
+function pct(value, max, min) {
+    return Math.max(min || 0, Math.min(100, Math.floor(value * 100 / max)));
+}
+
+function dateText(year, month, day) {
+    return MONTHS[month] + " " + day + ", Year " + year;
+}
+
+// Remove OpenRCT2 format codes like {RED} and the curly quotes around thoughts.
+function plain(s) {
+    return String(s).replace(/\{[A-Z0-9_ ]*\}/g, "").replace(/[“”]/g, "").trim();
+}
+
+function formatted(fmt, value) {
+    try {
+        return plain(context.formatString(fmt, value));
+    } catch (e) {
+        return null;
+    }
+}
+
+// Drop null/undefined fields to keep results compact.
+function compact(obj) {
+    var out = {};
+    for (var k in obj) if (obj[k] !== null && obj[k] !== undefined) out[k] = obj[k];
+    return out;
+}
+
+function objectiveInfo(o) {
+    var info = { type: o.type };
+    if (o.guests) info.guests = o.guests;
+    if (o.year) info.by_end_of_year = o.year;
+    if (o.parkValue) info.park_value = money(o.parkValue);
+    if (o.monthlyIncome) info.monthly_income = money(o.monthlyIncome);
+    if (o.excitement) info.min_excitement = o.excitement / 100;
+    if (o.length) info.min_length_m = o.length;
+    return info;
+}
+
+function rideInfo(r, detailed) {
+    var isRide = r.classification === "ride";
+    var prices = r.price.map(money);
+    var station = r.stations.reduce(function (m, s) { return Math.max(m, s.queueTime); }, 0);
+    var info = {
+        id: r.id,
+        name: r.name,
+        type: r.object ? r.object.name : null,
+        kind: r.classification,
+        status: r.status,
+        broken_down: r.breakdown !== "none" && r.breakdown !== "" ? r.breakdown : null,
+        excitement: isRide ? rating(r.excitement) : null,
+        intensity: isRide ? rating(r.intensity) : null,
+        nausea: isRide ? rating(r.nausea) : null,
+        price: isRide ? prices[0] : prices,
+        customers: r.totalCustomers,
+        total_profit: money(r.totalProfit),
+        profit_per_hour: money(r.profit),
+        running_cost_per_hour: r.runningCost <= -9.2e18 ? null : money(r.runningCost * 16),
+        age_months: r.age,
+        downtime_pct: isRide ? r.downtime : null,
+        // 255 * 5 means "no data yet".
+        satisfaction_pct: r.satisfaction <= 100 ? r.satisfaction : null,
+        max_queue_min: isRide ? station : null
+    };
+    if (detailed) {
+        info.photo_price = isRide && prices.length > 1 ? prices[1] : null;
+        info.income_per_hour = money(r.incomePerHour);
+        info.reliability_pct = isRide ? r.reliability : null;
+        info.guests_on_ride = r.guestCount;
+        info.value = money(r.value);
+        info.inspection = isRide ? INSPECTION[r.inspectionInterval] : null;
+        if (isRide && rating(r.excitement) !== null) {
+            info.stats = {
+                max_speed_kmh: Math.round(r.maxSpeed * 1.609),
+                avg_speed_kmh: Math.round(r.averageSpeed * 1.609),
+                ride_time_s: r.rideTime,
+                length_m: Math.round(r.rideLength),
+                max_pos_g: r.maxPositiveVerticalGs,
+                max_neg_g: r.maxNegativeVerticalGs,
+                max_lateral_g: r.maxLateralGs,
+                airtime_s: r.totalAirTime,
+                drops: r.numDrops,
+                highest_drop: formatted("{HEIGHT}", r.highestDropHeight),
+                lift_hills: r.numLiftHills
+            };
+        }
+    }
+    return compact(info);
+}
+
+var TOOLS = {
+    get_park_summary: function () {
+        var s = scenario;
+        var weather = climate.current;
+        return compact({
+            park: park.name,
+            date: dateText(date.year, date.month, date.day),
+            cash: money(park.cash),
+            loan: money(park.bankLoan),
+            max_loan: money(park.maxBankLoan),
+            park_rating: park.rating,
+            guests_in_park: park.guests,
+            guest_soft_cap: park.suggestedGuestMaximum,
+            park_value: money(park.value),
+            company_value: money(park.companyValue),
+            park_open: park.getFlag("open"),
+            entrance_fee: park.getFlag("freeParkEntry") ? 0 : money(park.entranceFee),
+            pay_per_ride: park.getFlag("freeParkEntry") || park.getFlag("unlockAllPrices"),
+            no_money_scenario: park.getFlag("noMoney") || null,
+            weather: weather.weather + ", " + weather.temperature + " C",
+            weather_next: climate.future.weather,
+            awards: park.awards.map(function (a) { return (a.positive ? "+ " : "- ") + plain(a.text); }),
+            scenario: {
+                name: s.name,
+                status: s.status,
+                objective: objectiveInfo(s.objective)
+            }
+        });
+    },
+
+    list_rides: function () {
+        return map.rides.map(function (r) { return rideInfo(r, false); });
+    },
+
+    get_ride: function (args) {
+        var id = Number(args && args.id);
+        var r = isFinite(id) ? map.getRide(id) : null;
+        if (!r) throw new Error("no ride with id " + (args && args.id));
+        return rideInfo(r, true);
+    },
+
+    get_guest_overview: function () {
+        var guests = map.getAllEntities("guest");
+        var n = 0, lost = 0, sum = { happiness: 0, energy: 0, hunger: 0, thirst: 0, nausea: 0, toilet: 0, cash: 0 };
+        var thoughts = {};
+        for (var i = 0; i < guests.length; i++) {
+            var g = guests[i];
+            if (!g.isInPark) continue;
+            n++;
+            if (g.isLost) lost++;
+            // Same normalisation as the guest window's stat bars (windows/Guest.cpp).
+            sum.happiness += pct(g.happiness, 255, 3);
+            sum.energy += pct(g.energy - 32, 96, 3);
+            sum.hunger += 100 - pct(g.hunger - 32, 158);
+            sum.thirst += 100 - pct(g.thirst - 32, 158);
+            sum.nausea += pct(g.nausea - 32, 223);
+            sum.toilet += pct(g.toilet - 64, 178);
+            sum.cash += g.cash;
+            var th = g.thoughts;
+            for (var j = 0; j < th.length; j++) {
+                var t = plain(th[j].toString());
+                if (t) thoughts[t] = (thoughts[t] || 0) + 1;
+            }
+        }
+        var avg = {};
+        for (var k in sum) avg[k] = n ? Math.round(sum[k] / n) : null;
+        avg.cash = n ? money(sum.cash / n) : null;
+        var top = Object.keys(thoughts)
+            .sort(function (a, b) { return thoughts[b] - thoughts[a]; })
+            .slice(0, 15)
+            .map(function (t) { return { thought: t, guests: thoughts[t] }; });
+        return {
+            guests_in_park: n,
+            guests_lost: lost,
+            averages_pct: { happiness: avg.happiness, energy: avg.energy, hunger: avg.hunger, thirst: avg.thirst,
+                nausea: avg.nausea, toilet: avg.toilet },
+            average_cash: avg.cash,
+            litter_on_map: map.getAllEntities("litter").length,
+            top_thoughts: top
+        };
+    },
+
+    get_staff: function () {
+        var counts = { handyman: 0, mechanic: 0, security: 0, entertainer: 0 };
+        var staff = map.getAllEntities("staff");
+        for (var i = 0; i < staff.length; i++) counts[staff[i].staffType] = (counts[staff[i].staffType] || 0) + 1;
+        counts.total = staff.length;
+        return counts;
+    },
+
+    get_recent_messages: function (args) {
+        var limit = Math.max(1, Math.min(30, Math.floor(Number(args && args.limit) || 10)));
+        var msgs = park.messages.map(function (m, i) {
+            return { m: m.month, d: m.day, recent: !m.isArchived, i: i, type: m.type, text: m.text };
+        });
+        // Newest first: by date, then the recent queue before the archive, then later entries first.
+        msgs.sort(function (a, b) {
+            return (b.m - a.m) || (b.d - a.d) || (Number(b.recent) - Number(a.recent)) || (b.i - a.i);
+        });
+        return msgs.slice(0, limit).map(function (x) {
+            return { date: dateText(Math.floor(x.m / 8) + 1, x.m % 8, x.d), type: x.type, text: plain(x.text) };
+        });
+    }
+};
+
+// Positional argument for "!tool <name> <value>".
+var TOOL_ARG = { get_ride: "id", get_recent_messages: "limit" };
+
+function runTool(name, args) {
+    if (!Object.prototype.hasOwnProperty.call(TOOLS, name)) throw new Error("unknown tool " + name);
+    return TOOLS[name](args || {});
+}
+
 // ---------------------------------------------------------------- helper messages
 
 function handleMessage(msg) {
@@ -94,6 +316,17 @@ function handleMessage(msg) {
             break;
         case "say":
             tell(msg.player, msg.text);
+            break;
+        case "tool_call":
+            var reply = { type: "tool_result", id: msg.id };
+            try {
+                reply.ok = true;
+                reply.result = runTool(msg.name, msg.args);
+            } catch (e) {
+                reply.ok = false;
+                reply.error = String(e && e.message || e);
+            }
+            send(reply);
             break;
         default:
             log("unknown message type: " + msg.type);
@@ -143,7 +376,7 @@ function onConnection(socket) {
             log("helper disconnected");
         }
     });
-    send({ type: "hello", protocol: PROTOCOL, api: context.apiVersion });
+    send({ type: "hello", protocol: PROTOCOL, api: context.apiVersion, tools: Object.keys(TOOLS) });
 }
 
 // listen() throws if the port is in use, and a closed listener cannot be reused,
@@ -183,6 +416,9 @@ function onChat(e) {
         case "!help":
             later(function () { tell(player, HELP); });
             break;
+        case "!tool":
+            later(function () { toolCommand(player, arg); });
+            break;
         case "!ask":
         case "!reset":
             later(function () {
@@ -196,6 +432,31 @@ function onChat(e) {
     }
 }
 
+var TOOL_CHAT_LIMIT = 1600;  // chars of !tool output sent to chat; the full result goes to the server log
+
+function toolCommand(player, arg) {
+    var parts = arg.split(/\s+/).filter(Boolean);
+    var name = parts[0];
+    if (!name) {
+        tell(player, "Usage: !tool <name> [value]. Tools: " + Object.keys(TOOLS).join(", "));
+        return;
+    }
+    var args = {};
+    if (parts[1] !== undefined && TOOL_ARG[name]) args[TOOL_ARG[name]] = Number(parts[1]);
+    var out;
+    try {
+        out = JSON.stringify(runTool(name, args));
+    } catch (e) {
+        tell(player, "!tool " + name + " failed: " + (e && e.message || e));
+        return;
+    }
+    log("!tool " + name + " by " + playerName(player) + ": " + out);
+    if (out.length > TOOL_CHAT_LIMIT) {
+        out = out.slice(0, TOOL_CHAT_LIMIT) + " ... (" + out.length + " chars, full output in the server console)";
+    }
+    tell(player, out);
+}
+
 function main() {
     if (network.mode !== "server") return;
     context.subscribe("network.chat", onChat);
@@ -204,7 +465,7 @@ function main() {
 
 registerPlugin({
     name: "ParkAdvisor",
-    version: "0.1.0",
+    version: "0.2.0",
     authors: ["Simon"],
     type: "remote",
     licence: "MIT",

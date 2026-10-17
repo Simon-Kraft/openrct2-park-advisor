@@ -3,6 +3,6 @@
   "private": true,
   "description": "Test harness for the Park Advisor OpenRCT2 plugin",
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test --test-timeout=20000 test/*.test.js"
   }
 }

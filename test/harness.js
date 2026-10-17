@@ -92,6 +92,11 @@ function loadPlugin(opts = {}) {
         setInterval(cb, ms) { const h = setInterval(cb, ms); timers.add(h); return h; },
         clearTimeout(h) { clearTimeout(h); timers.delete(h); },
         clearInterval(h) { clearInterval(h); timers.delete(h); },
+        // Rough stand-in for the game's formatter (only the codes the plugin uses).
+        formatString(fmt, value) {
+            if (fmt === "{HEIGHT}") return `{BLACK}${Math.round(value * 1.5)}m`;
+            throw new Error("harness: unsupported format " + fmt);
+        },
     };
 
     const sandbox = {

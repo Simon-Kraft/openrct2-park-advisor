@@ -19,7 +19,7 @@ class Advisor:
     async def on_message(self, msg: dict) -> None:
         kind = msg.get("type")
         if kind == "hello":
-            log.info("plugin hello: protocol %s, API %s", msg.get("protocol"), msg.get("api"))
+            log.info("plugin hello: protocol %s, API %s, tools: %s", msg.get("protocol"), msg.get("api"), ", ".join(msg.get("tools", [])))
         elif kind == "ask":
             await self.on_ask(msg["player"], msg.get("name", "?"), msg.get("text", ""))
         elif kind == "reset":
