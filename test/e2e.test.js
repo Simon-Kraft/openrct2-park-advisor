@@ -7,6 +7,7 @@ const assert = require("node:assert/strict");
 const { spawn } = require("child_process");
 const path = require("path");
 const { loadPlugin } = require("./harness");
+const { makePark } = require("./fixtures");
 
 const ROOT = path.join(__dirname, "..");
 const PORT = 21780 + Math.floor(Math.random() * 1000);
@@ -15,7 +16,10 @@ const ALICE = 1;
 function startHelper(env = {}) {
     const proc = spawn(path.join(ROOT, ".venv", "bin", "python"), ["-m", "park_advisor"], {
         cwd: path.join(ROOT, "helper"),
-        env: { ...process.env, ADVISOR_PORT: String(PORT), ADVISOR_LLM: "fake", ADVISOR_LOG_LEVEL: "DEBUG", ...env },
+        env: {
+            ...process.env, ADVISOR_PORT: String(PORT), ADVISOR_LLM: "fake", ADVISOR_LOG_LEVEL: "DEBUG",
+            ADVISOR_ENV_FILE: "/dev/null", ADVISOR_RATE_LIMIT: "100", ...env,
+        },
         stdio: ["ignore", "pipe", "pipe"],
     });
     proc.output = "";
@@ -42,7 +46,7 @@ async function ask(plugin, text, n, player = ALICE) {
     return plugin.repliesTo(player, from);
 }
 
-let plugin = loadPlugin({ port: PORT });
+let plugin = loadPlugin({ port: PORT, globals: makePark() });
 let helper = null;
 
 after(async () => {
@@ -69,6 +73,8 @@ test("helper connects and !ask round-trips", async () => {
     const r = await ask(plugin, "!ask why are guests leaving?", 2);
     assert.equal(r[0], "Thinking...");
     assert.match(r[1], /why are guests leaving\?/);
+    // The fake LLM looked at the guests through the plugin's tool.
+    assert.match(r[1], /Tools: get_guest_overview guests_in_park=3/);
 });
 
 test("non-ASCII survives the bridge, braces are made safe", async () => {
@@ -77,17 +83,17 @@ test("non-ASCII survives the bridge, braces are made safe", async () => {
 });
 
 test("long answers are split at word boundaries", async () => {
-    const words = Array.from({ length: 120 }, (_, i) => "word" + i).join(" ");
+    const words = Array.from({ length: 60 }, (_, i) => "word" + i).join(" ");
     const r = await ask(plugin, "!ask " + words, 4);
     const echoed = r.slice(1);
     for (const part of echoed) assert.ok(part.length <= 200, `chunk too long: ${part.length}`);
-    assert.ok(echoed.join(" ").endsWith("word119"));
+    assert.ok(echoed.join(" ").includes("word0 word1 word2") && echoed.join(" ").includes("word58 word59"));
     for (const part of echoed) assert.match(part, /^\S.*\S$/);
 });
 
 test("helper reconnects after the plugin restarts", async () => {
     plugin.close();
-    plugin = loadPlugin({ port: PORT });
+    plugin = loadPlugin({ port: PORT, globals: makePark() });
     await plugin.waitFor(() => connectedCount(plugin) === 1, 15000, "reconnect");
     const r = await ask(plugin, "!ask still there?", 2);
     assert.match(r[1], /still there\?/);

@@ -88,4 +88,4 @@ function makePark() {
     };
 }
 
-module.exports = { makePark, MONEY_UNDEFINED };
+module.exports = { makePark, ride, MONEY_UNDEFINED };
