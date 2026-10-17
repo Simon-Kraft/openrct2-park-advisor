@@ -49,7 +49,7 @@ class Bridge:
             self._writer = writer
             pinger = asyncio.create_task(self._heartbeat())
             try:
-                await self.send({"type": "hello", "name": "advisor-helper"})
+                await self.send({"type": "hello", "name": "park-advisor-helper"})
                 await self._read_loop(reader)
             except (OSError, BridgeError, asyncio.IncompleteReadError, ValueError) as e:
                 log.warning("connection lost: %s", e)

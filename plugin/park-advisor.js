@@ -22,7 +22,7 @@ var buf = "";
 var retryHandle = null;
 
 function log(msg) {
-    console.log("[advisor] " + msg);
+    console.log("[park-advisor] " + msg);
 }
 
 // Split text into chat-sized pieces at word (or comma) boundaries.

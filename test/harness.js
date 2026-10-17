@@ -1,4 +1,4 @@
-// Loads plugin/advisor.js in a sandbox with stubbed OpenRCT2 globals, so the
+// Loads plugin/park-advisor.js in a sandbox with stubbed OpenRCT2 globals, so the
 // plugin can be exercised without the game. Socket semantics follow ScSocket.hpp:
 // data arrives as string chunks, write() returns true only on a partial send.
 "use strict";
@@ -8,7 +8,7 @@ const net = require("net");
 const path = require("path");
 const vm = require("vm");
 
-const PLUGIN = path.join(__dirname, "..", "plugin", "advisor.js");
+const PLUGIN = path.join(__dirname, "..", "plugin", "park-advisor.js");
 
 function makeSocket(sock) {
     return {
@@ -110,7 +110,7 @@ function loadPlugin(opts = {}) {
 
     let src = fs.readFileSync(PLUGIN, "utf8");
     if (opts.port) src = src.replace(/var PORT = \d+;/, `var PORT = ${opts.port};`);
-    vm.runInContext(src, sandbox, { filename: "advisor.js" });
+    vm.runInContext(src, sandbox, { filename: "park-advisor.js" });
     if (!registered) throw new Error("plugin did not call registerPlugin");
     registered.main();
 

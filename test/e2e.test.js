@@ -13,7 +13,7 @@ const PORT = 21780 + Math.floor(Math.random() * 1000);
 const ALICE = 1;
 
 function startHelper(env = {}) {
-    const proc = spawn(path.join(ROOT, ".venv", "bin", "python"), ["-m", "advisor_helper"], {
+    const proc = spawn(path.join(ROOT, ".venv", "bin", "python"), ["-m", "park_advisor"], {
         cwd: path.join(ROOT, "helper"),
         env: { ...process.env, ADVISOR_PORT: String(PORT), ADVISOR_LLM: "fake", ADVISOR_LOG_LEVEL: "DEBUG", ...env },
         stdio: ["ignore", "pipe", "pipe"],

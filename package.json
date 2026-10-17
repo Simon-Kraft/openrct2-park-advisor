@@ -1,5 +1,5 @@
 {
-  "name": "park-advisor",
+  "name": "openrct2-park-advisor",
   "private": true,
   "description": "Test harness for the Park Advisor OpenRCT2 plugin",
   "scripts": {
