@@ -16,7 +16,8 @@ MEMORY_TURNS = 3        # question/answer pairs remembered per player
 MEMORY_TTL = 15 * 60    # seconds of silence after which a conversation is forgotten
 MAX_QUESTION = 500      # chars
 TOOL_TIMEOUT = 10.0     # seconds per tool call to the plugin
-LOCAL_OPTIONS = {"temperature": 0.3, "max_tokens": 200}  # a 1B model invents less when it is not creative
+LOCAL_OPTIONS = {"temperature": 0.3, "max_tokens": 200,  # low temperature: small models invent less when not creative
+                 "reasoning_effort": "none"}  # Qwen3 would spend the whole token budget thinking; others ignore it
 
 
 class Memory:

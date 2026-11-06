@@ -53,7 +53,7 @@ class Config:
             llm_mode=_env("ADVISOR_LLM", "local").lower(),
             local_url=_env("LOCAL_URL", "http://localhost:11434"),
             local_router_model=_env("LOCAL_ROUTER_MODEL", "tev1:0.8b"),
-            local_answer_model=_env("LOCAL_ANSWER_MODEL", "gemma3:1b"),
+            local_answer_model=_env("LOCAL_ANSWER_MODEL", "qwen3:8b"),
             log_level=_env("ADVISOR_LOG_LEVEL", "INFO").upper(),
             rate_limit=int(_env("ADVISOR_RATE_LIMIT", "4")),
             ask_timeout=float(_env("ADVISOR_ASK_TIMEOUT", "90")),
