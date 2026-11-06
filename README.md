@@ -23,7 +23,7 @@ Either way, answers are plain text, at most about 3 sentences, in the language o
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env              # then edit it
 ollama pull tev1:0.8b && ollama pull gemma3:1b   # local mode needs Ollama 0.35 or newer
-./deploy.sh                       # copies the plugin to ~/.config/OpenRCT2/plugin
+./deploy.sh                       # copies the plugin to the OpenRCT2 plugin folder
 ```
 
 OpenRCT2 doesn't reload plugins while hosting, so restart the server after each deploy. Then start the helper:
