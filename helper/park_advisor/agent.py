@@ -17,7 +17,7 @@ log = logging.getLogger("agent")
 
 ToolRunner = Callable[[str, dict], Awaitable[dict]]
 
-MAX_ANSWER = 600      # chars; about three chat lines
+MAX_ANSWER = 600      # chars; one chat message
 
 
 # Short option texts for the decision model: in tests, longer ones were slower and no better.
@@ -75,7 +75,8 @@ and never invent numbers or names. If the data does not show something, say so.
 - Lists in the data are already sorted as stated, so the first entry is the highest.
 - You can only look, not change anything. Tell the players what they can do themselves.
 - Answer in plain text only: no markdown, no lists, no emojis.
-- Keep it short: at most 3 short sentences, with ride names and numbers.
+- Keep it short: at most 3 short sentences, with ride names and numbers. Write them as one \
+continuous paragraph, with no line breaks.
 - Answer in the language of the question.
 
 Units: money is in the park's currency. Park rating goes from 0 to 999. Guest averages are percentages.\
