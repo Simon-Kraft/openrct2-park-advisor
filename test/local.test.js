@@ -81,7 +81,7 @@ test("long ride lists are cut, broken and closed rides always stay", async () =>
     }
     park.map.rides.push(...extra);
     try {
-        const r = await ask(5, "!ask which ride makes the most profit?", 3);
+        const r = await ask(5, "!ask which ride makes the most profit?", 2);
         const answer = r.slice(1).join(" ");
         assert.match(answer, /rides 25 total, sorted by profit per hour, highest first\. Rides: Big Dipper, Stall 19, Stall 18,/);
         // 12 by profit, plus the closed Merry-Go-Round and the testing coaster.

@@ -183,7 +183,7 @@ test("!tool prints results in chat, safely", async () => {
     const text = plugin.repliesTo(ALICE, from).join("");
     assert.match(text, /"name":"Big Dipper"/);
     for (const part of plugin.repliesTo(ALICE, from)) {
-        assert.ok(part.length <= 200);
+        assert.ok(part.length <= 1000);
         assert.ok(!/[{}]/.test(part));
     }
 

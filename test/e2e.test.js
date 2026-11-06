@@ -82,13 +82,13 @@ test("non-ASCII survives the bridge, braces are made safe", async () => {
     assert.match(r[1], /Gäste \(RED\) weg\? Größe/);
 });
 
-test("long answers are split at word boundaries", async () => {
+test("a long answer arrives as one chat message", async () => {
     const words = Array.from({ length: 60 }, (_, i) => "word" + i).join(" ");
-    const r = await ask(plugin, "!ask " + words, 4);
-    const echoed = r.slice(1);
-    for (const part of echoed) assert.ok(part.length <= 200, `chunk too long: ${part.length}`);
-    assert.ok(echoed.join(" ").includes("word0 word1 word2") && echoed.join(" ").includes("word58 word59"));
-    for (const part of echoed) assert.match(part, /^\S.*\S$/);
+    const r = await ask(plugin, "!ask " + words, 2);
+    await new Promise((res) => setTimeout(res, 200));
+    const echoed = plugin.repliesTo(ALICE).slice(-1);
+    assert.equal(r.length, 2);
+    assert.ok(echoed[0].includes("word0 word1 word2") && echoed[0].includes("word59"));
 });
 
 test("helper reconnects after the plugin restarts", async () => {

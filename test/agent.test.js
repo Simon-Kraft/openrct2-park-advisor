@@ -85,11 +85,11 @@ test("answers are cleaned to plain text the game can render", async () => {
     assert.equal(r[1], 'Great park! Your "Big Dipper" is popular - add a Burger Bar... item one.');
 });
 
-test("very long answers are cut to about three chat lines", async () => {
-    const r = await ask(11, "!ask #long", 3);
+test("very long answers are cut to one chat message", async () => {
+    const r = await ask(11, "!ask #long", 2);
     await new Promise((res) => setTimeout(res, 200));
     const answer = plugin.repliesTo(11).slice(1);
-    assert.ok(answer.length <= 3, `${answer.length} chat lines`);
+    assert.ok(answer.length === 1, `${answer.length} chat messages`);
     assert.ok(answer.join(" ").length <= 600);
     assert.match(r[r.length - 1], /\.$/);
 });

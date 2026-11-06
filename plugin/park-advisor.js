@@ -9,7 +9,7 @@
 // replaces the old.
 
 var PORT = 11780;
-var CHUNK = 200;          // max chars per chat message
+var CHUNK = 1000;         // max chars per chat message; answers are capped at 600, so they go out whole
 var RETRY_MS = 5000;      // listener retry delay when the port is busy
 var PROTOCOL = 1;
 
@@ -25,7 +25,8 @@ function log(msg) {
     console.log("[park-advisor] " + msg);
 }
 
-// Split text into chat-sized pieces at word (or comma) boundaries.
+// Split text into chat-sized pieces at word (or comma) boundaries. Only a safety net for very long
+// text: the game wraps long lines itself, so short pieces would just look like separate messages.
 function chunk(text, max) {
     var rest = String(text).replace(/\s+/g, " ").trim();
     var out = [];
@@ -432,7 +433,7 @@ function onChat(e) {
     }
 }
 
-var TOOL_CHAT_LIMIT = 1600;  // chars of !tool output sent to chat; the full result goes to the server log
+var TOOL_CHAT_LIMIT = 950;   // chars of !tool output sent to chat; the full result goes to the server log
 
 function toolCommand(player, arg) {
     var parts = arg.split(/\s+/).filter(Boolean);
