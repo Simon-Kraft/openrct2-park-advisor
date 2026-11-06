@@ -73,8 +73,8 @@ test("helper connects and !ask round-trips", async () => {
     const r = await ask(plugin, "!ask why are guests leaving?", 2);
     assert.equal(r[0], "Thinking...");
     assert.match(r[1], /why are guests leaving\?/);
-    // The fake LLM looked at the guests through the plugin's tool.
-    assert.match(r[1], /Tools: get_guest_overview guests_in_park=3/);
+    // The router picked the guest tool and its data reached the answer model.
+    assert.match(r[1], /Data: guests\./);
 });
 
 test("non-ASCII survives the bridge, braces are made safe", async () => {

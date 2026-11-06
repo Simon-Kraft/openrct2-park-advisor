@@ -5,10 +5,10 @@ import logging
 import time
 from collections import deque
 
-from .agent import Agent, LocalAgent
+from .agent import Agent
 from .bridge import Bridge, BridgeError
 from .config import Config
-from .llm import FakeLLM, FakeRouter, JevRouter, LLMError, OpenAIChat
+from .llm import FakeLLM, FakeRouter, JevRouter, LLMError, OllamaChat
 
 log = logging.getLogger("app")
 
@@ -70,26 +70,21 @@ class Advisor:
         self.cfg = cfg
         self.bridge = Bridge(cfg.bridge_host, cfg.bridge_port, self.on_message)
         self.agent = None
-        if cfg.llm_mode == "openai":
-            llm = OpenAIChat(cfg.llm_base_url, cfg.llm_api_key, cfg.llm_model, cfg.llm_fallback_model, cfg.llm_timeout)
-            self.agent = Agent(llm, self.run_tool)
-            log.info("LLM: %s at %s (fallback %s)", cfg.llm_model, cfg.llm_base_url, cfg.llm_fallback_model or "none")
-        elif cfg.llm_mode == "local":
+        if cfg.llm_mode == "local":
             # The whole question has one timeout; a cold model load alone can take a while on a Pi.
             router = JevRouter(cfg.local_url, cfg.local_router_model, cfg.ask_timeout)
-            llm = OpenAIChat(cfg.local_url.rstrip("/") + "/v1/", "ollama", cfg.local_answer_model, "", cfg.ask_timeout,
+            llm = OllamaChat(cfg.local_url.rstrip("/") + "/v1/", cfg.local_answer_model, cfg.ask_timeout,
                              **LOCAL_OPTIONS)
-            self.agent = LocalAgent(router, llm, self.run_tool)
+            self.agent = Agent(router, llm, self.run_tool)
             log.info("LLM: local, %s picks tools, %s answers, at %s", cfg.local_router_model, cfg.local_answer_model,
                      cfg.local_url)
         elif cfg.llm_mode == "fake":
-            self.agent = Agent(FakeLLM(), self.run_tool)
+            self.agent = Agent(FakeRouter(), FakeLLM(), self.run_tool)
             log.info("LLM: fake (tests)")
-        elif cfg.llm_mode == "fake-local":
-            self.agent = LocalAgent(FakeRouter(), FakeLLM(), self.run_tool)
-            log.info("LLM: fake local (tests)")
-        else:
+        elif cfg.llm_mode == "echo":
             log.info("LLM: none, echo mode")
+        else:
+            raise ValueError(f"Unsupported ADVISOR_LLM {cfg.llm_mode!r}; valid modes: local, echo")
         self.memory = Memory()
         self.limiter = RateLimiter(cfg.rate_limit)
         self.busy: set[int] = set()

@@ -1,8 +1,8 @@
-"""The agents: question -> tools against the live park -> short plain-text answer.
+"""The agent: question -> tools against the live park -> short plain-text answer.
 
-Agent lets a tool-calling model (e.g. Gemini) run the loop itself. LocalAgent is for small local
-models that cannot call tools: a decision model picks the tools, the helper runs them, and a
-small chat model writes the answer from a compact text version of the results."""
+Local models are small, so the model does not call tools itself: a decision model picks the tools,
+the helper runs them, and a small chat model writes the answer from a compact text version of the
+results."""
 
 import asyncio
 import json
@@ -15,125 +15,9 @@ from .llm import LLMError, Reply
 
 log = logging.getLogger("agent")
 
-MAX_ROUNDS = 6        # LLM calls that may request tools, per question
-MAX_ANSWER = 600      # chars; about three chat lines
-MAX_TOOL_RESULT = 30000
-
-SYSTEM_PROMPT = """\
-You are the Park Advisor, a friendly expert on RollerCoaster Tycoon 2, helping players on an \
-OpenRCT2 multiplayer server run their shared park. Players ask you questions in the game chat.
-
-Rules:
-- Look up the live park with the tools before answering anything about this park. Never guess \
-numbers, names or causes. If the tools do not show something, say so.
-- You can only look, not change anything. If asked to change the park, tell the players what \
-they can do themselves.
-- Answer in plain text only: no markdown, no lists, no emojis or special symbols. The game font \
-cannot show them.
-- Keep it short: at most 3 short sentences. Give the most useful concrete advice first, with ride \
-names and numbers.
-- Answer in the language of the question.
-
-Units: money is in the park's currency. Ride excitement, intensity and nausea use the usual \
-in-game scale (for example 6.52). Park rating goes from 0 to 999. Guest averages are percentages.\
-"""
-
-NO_ARGS = {"type": "object", "properties": {}}
-
-TOOL_SPECS = [
-    ("get_park_summary",
-     "Park overview: name, date, cash, loan and max loan, park rating (0-999), guests in park and the "
-     "suggested guest maximum, park and company value, entrance fee, weather now and next, awards, "
-     "scenario name, objective and status.",
-     NO_ARGS),
-    ("list_rides",
-     "All rides, shops/stalls and facilities: id, name, type, status, breakdown, excitement/intensity/"
-     "nausea, price, customers, total profit, profit and running cost per hour, age in months, downtime %, "
-     "guest satisfaction %, longest queue in minutes. Use the id with get_ride.",
-     NO_ARGS),
-    ("get_ride",
-     "Full details for one ride by id (from list_rides), adding reliability, inspection interval, "
-     "income per hour, guests on the ride, ride value and, for rated rides, speed, G-forces, drops, "
-     "airtime and ride length.",
-     {"type": "object", "properties": {"id": {"type": "integer", "description": "Ride id from list_rides"}},
-      "required": ["id"]}),
-    ("get_guest_overview",
-     "Guests in the park, lost guests, litter count, average cash, average needs in percent (happiness "
-     "and energy: higher is better; hunger, thirst, nausea and toilet: higher means a stronger need), "
-     "and the 15 most common guest thoughts with how many guests have them. The best source for why "
-     "guests are unhappy or leaving.",
-     NO_ARGS),
-    ("get_staff",
-     "Number of handymen, mechanics, security guards and entertainers.",
-     NO_ARGS),
-    ("get_recent_messages",
-     "Recent park news messages, newest first, with dates: breakdowns, awards, finance warnings, "
-     "guest complaints, research and so on.",
-     {"type": "object", "properties": {
-         "limit": {"type": "integer", "description": "How many messages, 1-30 (default 10)"}}}),
-]
-
 ToolRunner = Callable[[str, dict], Awaitable[dict]]
 
-
-def tool_definitions(available: set[str] | None = None) -> list[dict]:
-    return [{"type": "function", "function": {"name": n, "description": d, "parameters": p}}
-            for n, d, p in TOOL_SPECS if available is None or n in available]
-
-
-class Agent:
-    def __init__(self, llm, run_tool: ToolRunner):
-        self.llm = llm
-        self.run_tool = run_tool
-        self.tools = tool_definitions()
-
-    def set_available_tools(self, names: list[str]) -> None:
-        self.tools = tool_definitions(set(names))
-
-    async def answer(self, question: str, history: list[tuple[str, str]], player_name: str) -> str:
-        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT + f"\n\nThe player asking is {player_name}."}]
-        for q, a in history:
-            messages.append({"role": "user", "content": q})
-            messages.append({"role": "assistant", "content": a})
-        messages.append({"role": "user", "content": question})
-
-        for round_no in range(MAX_ROUNDS):
-            reply = await self.llm.complete(messages, self.tools)
-            if not reply.tool_calls:
-                return self._finish(reply)
-            messages.append(reply.message)
-            for call in reply.tool_calls:
-                messages.append({"role": "tool", "tool_call_id": call.id, "content": await self._tool(call)})
-
-        log.info("tool round limit reached, asking for a final answer")
-        reply = await self.llm.complete(messages, self.tools, tool_choice="none")
-        return self._finish(reply)
-
-    async def _tool(self, call) -> str:
-        try:
-            args = json.loads(call.arguments) if call.arguments.strip() else {}
-            if not isinstance(args, dict):
-                raise ValueError("arguments must be an object")
-        except ValueError as e:
-            return json.dumps({"error": f"invalid arguments: {e}"})
-        if not any(t["function"]["name"] == call.name for t in self.tools):
-            return json.dumps({"error": f"unknown tool {call.name}"})
-        log.info("tool %s %s", call.name, json.dumps(args))
-        res = await self.run_tool(call.name, args)
-        if not res.get("ok"):
-            log.info("tool %s failed: %s", call.name, res.get("error"))
-            return json.dumps({"error": res.get("error", "tool failed")})
-        text = json.dumps(res.get("result"), ensure_ascii=False, separators=(",", ":"))
-        if len(text) > MAX_TOOL_RESULT:
-            text = text[:MAX_TOOL_RESULT] + " ...(truncated)"
-        return text
-
-    @staticmethod
-    def _finish(reply: Reply) -> str:
-        text = shorten(plain_text(reply.content), MAX_ANSWER)
-        if not text:
-            raise LLMError("empty answer")
-        return text
+MAX_ANSWER = 600      # chars; about three chat lines
 
 
 # Short option texts for the decision model: in tests, longer ones were slower and no better.
@@ -198,7 +82,7 @@ Units: money is in the park's currency. Park rating goes from 0 to 999. Guest av
 """
 
 
-class LocalAgent:
+class Agent:
     """Decision model picks tools, the helper runs them, a small chat model answers in one call."""
 
     def __init__(self, router, llm, run_tool: ToolRunner):
@@ -224,8 +108,8 @@ class LocalAgent:
             # Small models follow rules better when they sit right next to the question.
             messages.append({"role": "user", "content": (data + "\n\n" if data else "") + REMINDER + "Question: " + question})
             log.debug("prompt: %r", messages[-1]["content"])
-            reply = await self.llm.complete(messages, [])
-            return first_sentences(Agent._finish(reply), MAX_SENTENCES)
+            reply = await self.llm.complete(messages)
+            return first_sentences(finish_answer(reply), MAX_SENTENCES)
 
     async def pick_tools(self, question: str, history: list[tuple[str, str]], names_ride: bool) -> list[str]:
         options = {n: d for n, d in ROUTER_OPTIONS.items() if n in self.available}
@@ -392,6 +276,13 @@ def plain_text(s: str) -> str:
         elif unicodedata.category(ch)[0] in "LMNPZ" and unicodedata.category(ch) != "Mn" or ch in "€":
             out.append(ch)
     return re.sub(r"\s+", " ", "".join(out)).replace(" .", ".").strip()
+
+
+def finish_answer(reply: Reply) -> str:
+    text = shorten(plain_text(reply.content), MAX_ANSWER)
+    if not text:
+        raise LLMError("empty answer")
+    return text
 
 
 def first_sentences(s: str, n: int) -> str:
