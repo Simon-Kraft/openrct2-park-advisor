@@ -22,7 +22,7 @@ before(async () => {
     helper = spawn(path.join(ROOT, ".venv", "bin", "python"), ["-m", "park_advisor"], {
         cwd: path.join(ROOT, "helper"),
         env: {
-            ...process.env, ADVISOR_PORT: String(PORT), ADVISOR_LLM: "fake-local", ADVISOR_LOG_LEVEL: "DEBUG",
+            ...process.env, ADVISOR_PORT: String(PORT), ADVISOR_LLM: "fake", ADVISOR_LOG_LEVEL: "DEBUG",
             ADVISOR_ENV_FILE: "/dev/null", ADVISOR_RATE_LIMIT: "100",
         },
         stdio: ["ignore", "pipe", "pipe"],

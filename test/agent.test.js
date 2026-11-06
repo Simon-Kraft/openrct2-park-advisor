@@ -1,5 +1,5 @@
-// Agent loop: plugin in the harness <-> real Python helper with the scripted fake LLM.
-// Covers tool calls, memory, limits, timeouts, error messages and answer cleanup.
+// Agent: plugin in the harness <-> real Python helper with the scripted fake router and LLM.
+// Covers memory, limits, timeouts, error messages and answer cleanup.
 "use strict";
 
 const { test, before, after } = require("node:test");
@@ -47,26 +47,6 @@ async function ask(player, text, n = 2) {
     return plugin.repliesTo(player, from);
 }
 
-test("the model's tool calls run in the plugin", async () => {
-    const r = await ask(1, "!ask how are my rides?");
-    assert.equal(r[0], "Thinking...");
-    assert.match(r[1], /Tools: list_rides 5 items\./);
-});
-
-test("several tools in one round, and tool arguments", async () => {
-    let r = await ask(2, "!ask guests and staff?");
-    assert.match(r[1], /get_guest_overview guests_in_park=3 guests_lost=1; get_staff handyman=2 mechanic=1/);
-    r = await ask(2, "!ask tell me about ride 4");
-    assert.match(r[1], /get_ride id=4 name=Merry-Go-Round 1/);
-});
-
-test("tool errors go back to the model instead of failing the question", async () => {
-    const r = await ask(3, "!ask what about ride 99?");
-    assert.match(r[1], /get_ride error no ride with id 99/);
-    const r2 = await ask(3, "!ask #badtool park");
-    assert.match(r2[1], /get_park_summary park=Simon's Park .*; delete_park error unknown tool delete_park\./);
-});
-
 test("follow-up questions see the conversation, !reset forgets it", async () => {
     let r = await ask(4, "!ask first");
     assert.doesNotMatch(r[1], /History/);
@@ -94,12 +74,6 @@ test("one question at a time per player, and a timeout ends a hanging question",
     assert.equal(plugin.repliesTo(7, from)[2], "Sorry, that took too long. Please try again.");
 });
 
-test("the tool round limit forces a final answer", async () => {
-    const r = await ask(8, "!ask #loop");
-    // 6 rounds with one get_staff call each, then an answer without tools.
-    assert.equal((r[1].match(/get_staff/g) || []).length, 6);
-});
-
 test("LLM failures give a friendly message", async () => {
     assert.deepEqual(await ask(9, "!ask #fail"), ["Thinking...", "Sorry, the advisor can't think right now. Please try again later."]);
     assert.deepEqual(await ask(9, "!ask #ratelimit"),
@@ -108,11 +82,11 @@ test("LLM failures give a friendly message", async () => {
 
 test("answers are cleaned to plain text the game can render", async () => {
     const r = await ask(10, "!ask #markdown");
-    assert.equal(r[1], 'Great park! Your "Big Dipper" is popular - add a Burger Bar... item one. item two');
+    assert.equal(r[1], 'Great park! Your "Big Dipper" is popular - add a Burger Bar... item one.');
 });
 
 test("very long answers are cut to about three chat lines", async () => {
-    const r = await ask(11, "!ask #long", 4);
+    const r = await ask(11, "!ask #long", 3);
     await new Promise((res) => setTimeout(res, 200));
     const answer = plugin.repliesTo(11).slice(1);
     assert.ok(answer.length <= 3, `${answer.length} chat lines`);

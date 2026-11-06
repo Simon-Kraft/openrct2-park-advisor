@@ -9,13 +9,13 @@ There are two parts:
 
 ## How questions are answered
 
-- **`local` (default):** everything runs on the server through [Ollama](https://ollama.com).
-  1. A decision model (`tev1:0.8b`, through `/v1/systemone`) picks the park data the question needs. Keywords and ride names add anything it misses.
-  2. The helper fetches the data and trims it to a short text.
-  3. A small chat model (`gemma3:1b`) writes the answer in one call.
-- **`openai`:** any OpenAI-compatible API with tool calling, by default Gemini. The model calls the tools itself, for up to 6 rounds.
+Everything runs on the server through [Ollama](https://ollama.com):
 
-Either way, answers are plain text, at most about 3 sentences, in the language of the question. Each player's last 3 questions are remembered for 15 minutes. Each player can ask 4 questions per minute.
+1. A decision model (`tev1:0.8b`, through `/v1/systemone`) picks the park data the question needs. Keywords and ride names add anything it misses.
+2. The helper fetches the data and trims it to a short text.
+3. A small chat model (`gemma3:1b`) writes the answer in one call.
+
+Answers are plain text, at most about 3 sentences, in the language of the question. Each player's last 3 questions are remembered for 15 minutes. Each player can ask 4 questions per minute.
 
 ## Setup
 
@@ -48,4 +48,4 @@ cd helper && ../.venv/bin/python -m park_advisor
 npm test
 ```
 
-The tests load the plugin in a Node harness with stubbed OpenRCT2 globals and talk to the real Python helper. The LLMs are replaced by scripted fakes (`ADVISOR_LLM=fake` and `fake-local`).
+The tests load the plugin in a Node harness with stubbed OpenRCT2 globals and talk to the real Python helper. The LLMs are replaced by scripted fakes (`ADVISOR_LLM=fake`).
