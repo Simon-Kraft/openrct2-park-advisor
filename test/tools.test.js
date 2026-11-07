@@ -4,8 +4,7 @@
 
 const { test, after } = require("node:test");
 const assert = require("node:assert/strict");
-const net = require("net");
-const { loadPlugin } = require("./harness");
+const { loadPlugin, connect } = require("./harness");
 const { makePark } = require("./fixtures");
 
 const PORT = 23780 + Math.floor(Math.random() * 1000);
@@ -18,50 +17,18 @@ after(() => {
     plugin.close();
 });
 
-/** Minimal NDJSON client playing the helper's role. */
-function connect() {
-    return new Promise((resolve, reject) => {
-        const sock = net.connect(PORT, "127.0.0.1");
-        const waiting = new Map();
-        let buf = "";
-        let hello = null;
-        sock.on("data", (d) => {
-            buf += d.toString("utf8");
-            let nl;
-            while ((nl = buf.indexOf("\n")) >= 0) {
-                const msg = JSON.parse(buf.slice(0, nl));
-                buf = buf.slice(nl + 1);
-                if (msg.type === "hello") { hello = msg; resolve(api); }
-                else if (waiting.has(msg.id)) { waiting.get(msg.id)(msg); waiting.delete(msg.id); }
-            }
-        });
-        sock.on("error", reject);
-        let id = 0;
-        const api = {
-            sock,
-            get hello() { return hello; },
-            call(name, args) {
-                const rid = ++id;
-                return new Promise((res) => {
-                    waiting.set(rid, res);
-                    sock.write(JSON.stringify({ type: "tool_call", id: rid, name, args }) + "\n");
-                });
-            },
-        };
-    });
-}
-
 async function tool(name, args) {
-    if (!client) client = await connect();
+    if (!client) client = await connect(PORT);
     const r = await client.call(name, args);
     assert.equal(r.ok, true, r.error);
     return r.result;
 }
 
 test("hello lists the tools", async () => {
-    client = await connect();
+    client = await connect(PORT);
     assert.deepEqual(client.hello.tools, [
         "get_park_summary", "list_rides", "get_ride", "get_guest_overview", "get_staff", "get_recent_messages",
+        "get_buildable", "find_sites", "get_player_info", "build", "demolish",
     ]);
     assert.equal(client.hello.api, 124);
 });

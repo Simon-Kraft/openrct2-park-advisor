@@ -4,7 +4,7 @@ A chat bot for OpenRCT2 multiplayer servers. Players type `!ask <question>` in t
 
 There are two parts:
 
-- **`plugin/park-advisor.js`**: a server-side OpenRCT2 plugin (tested on v0.5.6). It handles the chat commands and reads the park through six read-only tools: park summary, ride list, ride details, guests, staff, recent news. It listens on `127.0.0.1:11780`.
+- **`plugin/park-advisor.js`**: a server-side OpenRCT2 plugin (tested on v0.5.6). It handles the chat commands and reads the park through read-only tools: park summary, ride list, ride details, guests, staff, recent news, and for building: buildable stalls, free sites next to paths, player info. Two write tools build and demolish stalls; only the helper can call them, and only when building is enabled. It listens on `127.0.0.1:11780`.
 - **`helper/`**: a Python program that connects to the plugin and answers questions with an LLM.
 
 ## How questions are answered

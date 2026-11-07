@@ -78,6 +78,7 @@ function dropConn() {
     var c = conn;
     conn = null;
     buf = "";
+    buildEnabled = false;
     if (c) {
         try { c.end(); } catch (e) { /* already closed */ }
     }
@@ -294,15 +295,366 @@ var TOOLS = {
         return msgs.slice(0, limit).map(function (x) {
             return { date: dateText(Math.floor(x.m / 8) + 1, x.m % 8, x.d), type: x.type, text: plain(x.text) };
         });
+    },
+
+    // For building, see below.
+    get_buildable: buildable,
+    find_sites: findSites,
+    get_player_info: playerInfo
+};
+
+// ---------------------------------------------------------------- building
+// Map reads for placing stalls, and the write tools that build and demolish them. The helper
+// decides what and where; these only check and execute. Why each check is needed (the game
+// itself accepts much of this) is in docs/ride-placement-spike.md.
+
+var DELTA = [[-1, 0], [0, 1], [1, 0], [0, -1]];   // direction 0..3 as tile offsets
+var ENTRANCE_PARK = 2;          // EntranceElement.object: 0 ride entrance, 1 ride exit, 2 park entrance
+var SITE_RADIUS = 5;            // tiles counted for the nearby_* site features
+var MAX_SITES = 100;
+var MAX_PRICE = 20;             // currency; ridesetprice accepts 0..200 internal units
+var BUILD_TIMEOUT_MS = 30000;   // give up on a build whose callbacks never come back
+
+var buildEnabled = false;       // set by the helper's hello
+var building = null;            // the build in progress: {ride, player}
+
+function onMap(x, y) {
+    return x >= 1 && y >= 1 && x < map.size.x - 1 && y < map.size.y - 1;
+}
+
+// Nothing on the tile but flat, dry land the park owns. Scenery counts as taken: the game
+// would clear it silently.
+function freeLand(x, y) {
+    if (!onMap(x, y)) return null;
+    var els = map.getTile(x, y).elements;
+    var s = els.length === 1 ? els[0] : null;
+    return s && s.type === "surface" && s.hasOwnership && s.slope === 0 && !s.waterHeight ? s : null;
+}
+
+// A flat, non-queue footpath at height z.
+function flatPath(x, y, z) {
+    if (!onMap(x, y)) return null;
+    var els = map.getTile(x, y).elements;
+    for (var i = 0; i < els.length; i++) {
+        var e = els[i];
+        if (e.type === "footpath" && e.baseZ === z && e.slopeDirection === null && !e.isQueue) return e;
+    }
+    return null;
+}
+
+function bitCount(n) {
+    var c = 0;
+    for (; n; n >>= 1) c += n & 1;
+    return c;
+}
+
+// A 1x1 site for a stall: free land with a path next to it. The stall faces the path (the game
+// accepts any direction); with several paths, the busiest junction wins, then the lowest direction.
+function stallSite(x, y) {
+    var s = freeLand(x, y);
+    if (!s) return null;
+    var best = null;
+    for (var d = 0; d < 4; d++) {
+        var p = flatPath(x + DELTA[d][0], y + DELTA[d][1], s.baseZ);
+        var n = p ? bitCount(p.edges & 15) : -1;
+        if (p && (!best || n > best.path_neighbors)) {
+            best = { x: x, y: y, z: s.baseZ, direction: d, path: { x: x + DELTA[d][0], y: y + DELTA[d][1] }, path_neighbors: n };
+        }
+    }
+    return best;
+}
+
+function tileOf(pos) {
+    return pos ? { x: Math.floor(pos.x / 32), y: Math.floor(pos.y / 32) } : null;
+}
+
+function rideTile(r) {
+    for (var i = 0; i < r.stations.length; i++) {
+        var st = r.stations[i];
+        if (st.entrance || st.start) return tileOf(st.entrance || st.start);
+    }
+    return null;
+}
+
+function nearest(x, y, points) {
+    var best = null;
+    for (var i = 0; i < points.length; i++) {
+        var d = Math.abs(points[i].x - x) + Math.abs(points[i].y - y);
+        if (best === null || d < best) best = d;
+    }
+    return best;
+}
+
+// Points per tile, so counting around a site costs the same however many guests there are.
+function grid(points) {
+    var g = {};
+    for (var i = 0; i < points.length; i++) {
+        var k = points[i].x * 100000 + points[i].y;
+        g[k] = (g[k] || 0) + 1;
+    }
+    return g;
+}
+
+function countNear(x, y, g) {
+    var n = 0;
+    for (var dx = -SITE_RADIUS; dx <= SITE_RADIUS; dx++) {
+        for (var dy = -SITE_RADIUS; dy <= SITE_RADIUS; dy++) n += g[(x + dx) * 100000 + y + dy] || 0;
+    }
+    return n;
+}
+
+var SITE_SORT = ["dist_near", "dist_park_entrance", "dist_nearest_ride", "nearby_guests", "nearby_stalls", "path_neighbors"];
+
+function findSites(args) {
+    if ((args.width || 1) !== 1 || (args.height || 1) !== 1) throw new Error("only 1x1 sites are supported");
+    var limit = Math.max(1, Math.min(MAX_SITES, Math.floor(Number(args.limit) || 40)));
+    var near = null;
+    if (args.near_ride !== undefined && args.near_ride !== null) {
+        var target = map.getRide(Number(args.near_ride));
+        if (!target) throw new Error("no ride with id " + args.near_ride);
+        near = rideTile(target);
+    }
+    var sort = near ? "dist_near" : args.sort || null;
+    if (sort !== null && SITE_SORT.indexOf(sort) < 0) throw new Error("unknown sort " + sort);
+
+    // One pass over the map for paths and park entrances, then only the land next to paths is
+    // looked at: far fewer tile reads than checking every free tile for a path.
+    var entrances = [], paths = [], rides = [], stalls = [], guests = [], byTile = {};
+    for (var x = 0; x < map.size.x; x++) {
+        for (var y = 0; y < map.size.y; y++) {
+            var els = map.getTile(x, y).elements;
+            for (var i = 0; i < els.length; i++) {
+                var e = els[i];
+                if (e.type === "entrance" && e.object === ENTRANCE_PARK) entrances.push({ x: x, y: y });
+                if (e.type === "footpath" && e.slopeDirection === null && !e.isQueue) {
+                    paths.push({ x: x, y: y, z: e.baseZ, n: bitCount(e.edges & 15) });
+                }
+            }
+        }
+    }
+    paths.forEach(function (p) {
+        for (var d = 0; d < 4; d++) {
+            var sx = p.x - DELTA[d][0], sy = p.y - DELTA[d][1];   // the stall at sx,sy faces d, toward p
+            var s = freeLand(sx, sy);
+            if (!s || s.baseZ !== p.z) continue;
+            var key = sx * 100000 + sy, old = byTile[key];
+            // Same choice as stallSite: the busiest path, then the lowest direction.
+            if (!old || p.n > old.path_neighbors || (p.n === old.path_neighbors && d < old.direction)) {
+                byTile[key] = { x: sx, y: sy, z: s.baseZ, direction: d, path: { x: p.x, y: p.y }, path_neighbors: p.n };
+            }
+        }
+    });
+    var sites = Object.keys(byTile).map(function (k) { return byTile[k]; });
+    map.rides.forEach(function (r) {
+        var t = rideTile(r);
+        if (t) (r.classification === "ride" ? rides : stalls).push(t);
+    });
+    map.getAllEntities("guest").forEach(function (g) {
+        if (g.isInPark && isFinite(g.x)) guests.push(tileOf(g));
+    });
+    var guestGrid = grid(guests), stallGrid = grid(stalls);
+
+    sites.forEach(function (s) {
+        s.features = compact({
+            dist_near: near ? Math.abs(near.x - s.x) + Math.abs(near.y - s.y) : null,
+            dist_park_entrance: nearest(s.x, s.y, entrances),
+            dist_nearest_ride: nearest(s.x, s.y, rides),
+            nearby_guests: countNear(s.x, s.y, guestGrid),
+            nearby_stalls: countNear(s.x, s.y, stallGrid),
+            path_neighbors: s.path_neighbors
+        });
+        delete s.path_neighbors;
+    });
+    // Ascending distances, descending counts; ties by position so results are stable.
+    var desc = sort && sort.indexOf("dist_") !== 0;
+    sites.sort(function (a, b) {
+        if (sort) {
+            var fa = a.features[sort], fb = b.features[sort];
+            if (fa === undefined) fa = desc ? -1 : 1e9;
+            if (fb === undefined) fb = desc ? -1 : 1e9;
+            if (fa !== fb) return desc ? fb - fa : fa - fb;
+        }
+        return (a.x - b.x) || (a.y - b.y);
+    });
+    return { total: sites.length, near: near, sites: sites.slice(0, limit) };
+}
+
+function rideObject(identifier) {
+    var objs = objectManager.getAllObjects("ride");
+    for (var i = 0; i < objs.length; i++) if (objs[i].identifier === identifier) return objs[i];
+    return null;
+}
+
+function buildable(args) {
+    var types = args.ride_types || null;
+    var objects = objectManager.getAllObjects("ride").filter(function (o) {
+        return (!types || types.indexOf(o.rideType[0]) >= 0) && park.research.isObjectResearched("ride", o.index);
+    }).map(function (o) {
+        return { object: o.identifier, name: o.name, ride_type: o.rideType[0] };
+    });
+    return {
+        cash: money(park.cash),
+        no_money: park.getFlag("noMoney"),
+        max_price: MAX_PRICE,
+        objects: objects
+    };
+}
+
+function playerInfo(args) {
+    var p = network.getPlayer(Number(args.player));
+    var group = network.getGroup(p.group);
+    return {
+        id: p.id,
+        name: p.name,
+        group: group ? group.name : null,
+        // Only the admin group can modify groups by default; a renamed admin group still counts.
+        is_admin: !!group && group.permissions.indexOf("modify_groups") >= 0
+    };
+}
+
+function resultError(r) {
+    return plain(r.errorMessage || r.errorTitle || "error " + r.error);
+}
+
+// Check a build request and find the object; throws with a message for the player.
+function checkBuild(args) {
+    if (!buildEnabled) throw new Error("building is disabled");
+    if (building) throw new Error("another build is in progress");
+    var obj = rideObject(args.object);
+    if (!obj || !park.research.isObjectResearched("ride", obj.index)) throw new Error(args.object + " is not available");
+    if (obj.rideType[0] !== args.ride_type) throw new Error(args.object + " is not ride type " + args.ride_type);
+    var price = Number(args.price);
+    if (!(price >= 0 && price <= MAX_PRICE)) throw new Error("price must be between 0 and " + MAX_PRICE);
+    var site = stallSite(args.x, args.y);
+    if (!site || site.z !== args.z) throw new Error("that spot is not free any more");
+    var d = DELTA[args.direction];
+    if (!d || !flatPath(args.x + d[0], args.y + d[1], args.z)) throw new Error("there is no path in front of that spot");
+    return obj;
+}
+
+function trackArgs(args, ride) {
+    return {
+        x: args.x * 32, y: args.y * 32, z: args.z, direction: args.direction, ride: ride,
+        trackType: args.track_type, rideType: args.ride_type,
+        brakeSpeed: 0, colour: 0, seatRotation: 4, trackPlaceFlags: 0, isFromTrackDesign: false
+    };
+}
+
+// Without a ride of the same type to borrow, the game cannot query track placement (see the
+// spike), so the cost stays unknown and the helper estimates it.
+function dryRunBuild(args, obj, done) {
+    var createArgs = { rideType: args.ride_type, rideObject: obj.index, entranceObject: 0, colour1: 0, colour2: 0,
+        inspectionInterval: 2 };
+    context.queryAction("ridecreate", createArgs, function (r) {
+        if (r.error) return done(new Error(resultError(r)));
+        var same = map.rides.filter(function (x) { return x.type === args.ride_type; })[0];
+        if (!same) return done(null, { dry_run: true, cost: null, cash: money(park.cash) });
+        context.queryAction("trackplace", trackArgs(args, same.id), function (t) {
+            if (t.error) return done(new Error(resultError(t)));
+            done(null, { dry_run: true, cost: money(t.cost), cash: money(park.cash) });
+        });
+    });
+}
+
+// ridecreate -> trackplace -> ridesetprice -> ridesetstatus, each in the previous callback
+// (callbacks do not come back in call order). Any failure after ridecreate demolishes the ride.
+function executeBuild(args, obj, player, done) {
+    var started = date.ticksElapsed;
+    var cost = 0;
+    var job = building = { ride: null, player: null };
+    var timer = context.setTimeout(function () { finish(new Error("the game did not answer")); }, BUILD_TIMEOUT_MS);
+
+    function finish(err, result) {
+        if (building !== job) return;
+        building = null;
+        context.clearTimeout(timer);
+        if (err && job.ride !== null) {
+            context.executeAction("ridedemolish", { ride: job.ride, modifyType: 0 }, function (d) {
+                log("build rolled back ride " + job.ride + (d.error ? " FAILED: " + resultError(d) : ""));
+            });
+        }
+        done(err, result);
+    }
+
+    function step(name, stepArgs, next) {
+        context.executeAction(name, stepArgs, function (r) {
+            if (building !== job) {   // timed out meanwhile; don't leave a late ride behind
+                if (name === "ridecreate" && !r.error) context.executeAction("ridedemolish", { ride: r.ride, modifyType: 0 });
+                return;
+            }
+            if (r.error) {
+                log("build: " + name + " failed: " + resultError(r));
+                return finish(new Error(resultError(r)));
+            }
+            cost += r.cost || 0;
+            next(r);
+        });
+    }
+
+    step("ridecreate", { rideType: args.ride_type, rideObject: obj.index, entranceObject: 0, colour1: 0, colour2: 0,
+        inspectionInterval: 2 }, function (c) {
+        job.ride = c.ride;
+        step("trackplace", trackArgs(args, c.ride), function () {
+            step("ridesetprice", { ride: c.ride, price: Math.round(Number(args.price) * 10), isPrimaryPrice: true }, function () {
+                step("ridesetstatus", { ride: c.ride, status: args.open === false ? 0 : 1 }, function () {
+                    var ride = map.getRide(c.ride);
+                    log("built " + ride.name + " (ride " + c.ride + ") at " + args.x + "," + args.y + " for " + playerName(player) +
+                        ", cost " + money(cost) + ", took " + (date.ticksElapsed - started) + " ticks, actions ran as player " +
+                        job.player);
+                    finish(null, { ride_id: c.ride, name: ride.name, cost: money(cost), status: ride.status });
+                });
+            });
+        });
+    });
+}
+
+var WRITE_TOOLS = {
+    build: function (args, done) {
+        var obj = checkBuild(args);
+        if (args.dry_run) dryRunBuild(args, obj, done);
+        else executeBuild(args, obj, args.player, done);
+    },
+
+    demolish: function (args, done) {
+        if (!buildEnabled) throw new Error("building is disabled");
+        var ride = map.getRide(Number(args.ride_id));
+        if (!ride) throw new Error("no ride with id " + args.ride_id);
+        var name = ride.name;
+        context.executeAction("ridedemolish", { ride: ride.id, modifyType: 0 }, function (r) {
+            if (r.error) return done(new Error(resultError(r)));
+            log("demolished " + name + " (ride " + ride.id + ")");
+            done(null, { ride_id: ride.id, name: name, refund: money(-(r.cost || 0)) });
+        });
     }
 };
 
+// Which player the game runs our actions as: the host when hosting (see the spike).
+function onActionExecute(e) {
+    if (building && e.action === "ridecreate") building.player = e.player;
+}
+
 // Positional argument for "!tool <name> <value>".
-var TOOL_ARG = { get_ride: "id", get_recent_messages: "limit" };
+var TOOL_ARG = { get_ride: "id", get_recent_messages: "limit", get_player_info: "player" };
 
 function runTool(name, args) {
     if (!Object.prototype.hasOwnProperty.call(TOOLS, name)) throw new Error("unknown tool " + name);
     return TOOLS[name](args || {});
+}
+
+// Answer a tool call with done(err, result), later for the write tools.
+function callTool(name, args, done) {
+    var answered = false;
+    function once(err, result) {
+        if (answered) return;
+        answered = true;
+        done(err, result);
+    }
+    try {
+        if (Object.prototype.hasOwnProperty.call(WRITE_TOOLS, name)) WRITE_TOOLS[name](args || {}, once);
+        else once(null, runTool(name, args));
+    } catch (e) {
+        once(e);
+    }
 }
 
 // ---------------------------------------------------------------- helper messages
@@ -310,7 +662,8 @@ function runTool(name, args) {
 function handleMessage(msg) {
     switch (msg.type) {
         case "hello":
-            log("helper connected (" + (msg.name || "?") + ")");
+            buildEnabled = msg.build === true;
+            log("helper connected (" + (msg.name || "?") + ")" + (buildEnabled ? ", building enabled" : ""));
             break;
         case "ping":
             send({ type: "pong", id: msg.id });
@@ -319,15 +672,12 @@ function handleMessage(msg) {
             tell(msg.player, msg.text);
             break;
         case "tool_call":
-            var reply = { type: "tool_result", id: msg.id };
-            try {
-                reply.ok = true;
-                reply.result = runTool(msg.name, msg.args);
-            } catch (e) {
-                reply.ok = false;
-                reply.error = String(e && e.message || e);
-            }
-            send(reply);
+            callTool(msg.name, msg.args, function (err, result) {
+                var reply = { type: "tool_result", id: msg.id, ok: !err };
+                if (err) reply.error = String(err && err.message || err);
+                else reply.result = result;
+                send(reply);
+            });
             break;
         default:
             log("unknown message type: " + msg.type);
@@ -374,10 +724,12 @@ function onConnection(socket) {
         if (conn === socket) {
             conn = null;
             buf = "";
+            buildEnabled = false;
             log("helper disconnected");
         }
     });
-    send({ type: "hello", protocol: PROTOCOL, api: context.apiVersion, tools: Object.keys(TOOLS) });
+    send({ type: "hello", protocol: PROTOCOL, api: context.apiVersion,
+        tools: Object.keys(TOOLS).concat(Object.keys(WRITE_TOOLS)) });
 }
 
 // listen() throws if the port is in use, and a closed listener cannot be reused,
@@ -442,6 +794,10 @@ function toolCommand(player, arg) {
         tell(player, "Usage: !tool <name> [value]. Tools: " + Object.keys(TOOLS).join(", "));
         return;
     }
+    if (Object.prototype.hasOwnProperty.call(WRITE_TOOLS, name)) {
+        tell(player, "!tool only shows park data; " + name + " changes the park, use !build instead.");
+        return;
+    }
     var args = {};
     if (parts[1] !== undefined && TOOL_ARG[name]) args[TOOL_ARG[name]] = Number(parts[1]);
     var out;
@@ -461,6 +817,7 @@ function toolCommand(player, arg) {
 function main() {
     if (network.mode !== "server") return;
     context.subscribe("network.chat", onChat);
+    context.subscribe("action.execute", onActionExecute);
     startListener();
 }
 
