@@ -105,6 +105,7 @@ function loadPlugin(opts = {}) {
         // Rough stand-in for the game's formatter (only the codes the plugin uses).
         formatString(fmt, value) {
             if (fmt === "{HEIGHT}") return `{BLACK}${Math.round(value * 1.5)}m`;
+            if (fmt === "{CURRENCY2DP}") return `£${(value / 10).toFixed(2)}`;
             throw new Error("harness: unsupported format " + fmt);
         },
         // Timing as in the game (docs/ride-placement-spike.md): a query answers at once; an execute

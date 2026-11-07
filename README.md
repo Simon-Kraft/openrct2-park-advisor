@@ -41,6 +41,19 @@ cd helper && ../.venv/bin/python -m park_advisor
 | `!ping` | Check that the bot is running |
 | `!tool <name> [arg]` | Show raw tool output, for debugging |
 | `!help` | List the commands |
+| `!build <what>` | Propose a stall, e.g. `!build a cheap burger bar near the Big Dipper` (when building is enabled) |
+| `!yes` / `!no` | Build or cancel your proposal (it waits 2 minutes) |
+| `!undo` | Remove the last thing the bot built for you (admins: the last thing it built) |
+
+## Building
+
+With `BUILD_ENABLED=true` players can ask the bot to build stalls: food, drinks, souvenirs, information kiosks, toilets, ATMs and first aid. It never builds straight away: `!build` replies with a proposal (what, where, price, cost), and only `!yes` builds it.
+
+1. The chat model fills a small form from the request (category, price wish, a ride to build near, open or closed). If it fails, a few keywords still work, and an exact stall name always does.
+2. The decision model picks between the matching stalls and a price level when the request doesn't say.
+3. Plain code finds the spot: free, flat land the park owns, facing a path, near the named ride or where many guests walk by. It checks the build with the game first, and the plugin removes a half-built stall if a step fails.
+
+Only admins can build, plus the groups in `BUILD_ALLOWED_GROUPS`. Builds are limited per player per hour, by cost, and by a cash reserve the park keeps; see `.env.example`. The plugin's game actions run as the server host, so these checks happen in the helper. What the bot built is remembered only while the helper runs.
 
 ## Tests
 

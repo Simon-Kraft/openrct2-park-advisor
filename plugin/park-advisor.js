@@ -15,6 +15,8 @@ var PROTOCOL = 1;
 
 var HELP = "Park Advisor: !ask <question> asks the advisor about the park. " +
     "!reset forgets your conversation. !ping checks the bot. !tool <name> shows raw park data. !help shows this.";
+var HELP_BUILD = " !build <what> proposes a stall (I can build stalls, e.g. !build a cheap burger bar near the Big Dipper), " +
+    "!yes builds it, !no cancels, !undo removes your last build.";
 
 var listener = null;
 var conn = null;
@@ -496,8 +498,16 @@ function buildable(args) {
         cash: money(park.cash),
         no_money: park.getFlag("noMoney"),
         max_price: MAX_PRICE,
+        currency: currencyAffixes(),
         objects: objects
     };
+}
+
+// The park's currency as {prefix, suffix}, read off the game's own formatting of 1.00.
+function currencyAffixes() {
+    var text = formatted("{CURRENCY2DP}", 10) || "";
+    var m = /^(.*?)1[.,]00(.*)$/.exec(text);
+    return m ? { prefix: m[1], suffix: m[2] } : { prefix: "", suffix: "" };
 }
 
 function playerInfo(args) {
@@ -524,7 +534,7 @@ function checkBuild(args) {
     if (!obj || !park.research.isObjectResearched("ride", obj.index)) throw new Error(args.object + " is not available");
     if (obj.rideType[0] !== args.ride_type) throw new Error(args.object + " is not ride type " + args.ride_type);
     var price = Number(args.price);
-    if (!(price >= 0 && price <= MAX_PRICE)) throw new Error("price must be between 0 and " + MAX_PRICE);
+    if (args.price !== null && !(price >= 0 && price <= MAX_PRICE)) throw new Error("price must be between 0 and " + MAX_PRICE);
     var site = stallSite(args.x, args.y);
     if (!site || site.z !== args.z) throw new Error("that spot is not free any more");
     var d = DELTA[args.direction];
@@ -595,7 +605,9 @@ function executeBuild(args, obj, player, done) {
         inspectionInterval: 2 }, function (c) {
         job.ride = c.ride;
         step("trackplace", trackArgs(args, c.ride), function () {
-            step("ridesetprice", { ride: c.ride, price: Math.round(Number(args.price) * 10), isPrimaryPrice: true }, function () {
+            // ATMs and first aid have no price (the helper sends null).
+            var setPrice = args.price === null ? function (name, a, next) { next(); } : step;
+            setPrice("ridesetprice", { ride: c.ride, price: Math.round(Number(args.price) * 10), isPrimaryPrice: true }, function () {
                 step("ridesetstatus", { ride: c.ride, status: args.open === false ? 0 : 1 }, function () {
                     var ride = map.getRide(c.ride);
                     log("built " + ride.name + " (ride " + c.ride + ") at " + args.x + "," + args.y + " for " + playerName(player) +
@@ -619,6 +631,8 @@ var WRITE_TOOLS = {
         if (!buildEnabled) throw new Error("building is disabled");
         var ride = map.getRide(Number(args.ride_id));
         if (!ride) throw new Error("no ride with id " + args.ride_id);
+        // Ride ids are reused after a demolish, so the helper also says which ride it means.
+        if (args.name && ride.name !== args.name) throw new Error("ride " + ride.id + " is now called " + ride.name);
         var name = ride.name;
         context.executeAction("ridedemolish", { ride: ride.id, modifyType: 0 }, function (r) {
             if (r.error) return done(new Error(resultError(r)));
@@ -767,7 +781,7 @@ function onChat(e) {
             later(function () { tell(player, "pong" + (conn ? "" : " (advisor helper offline)")); });
             break;
         case "!help":
-            later(function () { tell(player, HELP); });
+            later(function () { tell(player, HELP + (buildEnabled ? HELP_BUILD : "")); });
             break;
         case "!tool":
             later(function () { toolCommand(player, arg); });
@@ -779,6 +793,22 @@ function onChat(e) {
                     tell(player, "Usage: !ask <question>");
                 } else if (!send({ type: cmd.slice(1), player: player, name: playerName(player), text: arg })) {
                     tell(player, "Sorry, the park advisor is offline right now.");
+                }
+            });
+            break;
+        case "!build":
+        case "!yes":
+        case "!no":
+        case "!undo":
+            later(function () {
+                if (!conn) {
+                    tell(player, "Sorry, the park advisor is offline right now.");
+                } else if (!buildEnabled) {
+                    tell(player, "Building is turned off on this server.");
+                } else if (cmd === "!build" && !arg) {
+                    tell(player, "Usage: !build <what>, e.g. !build a cheap burger bar");
+                } else {
+                    send({ type: cmd.slice(1), player: player, name: playerName(player), text: arg });
                 }
             });
             break;

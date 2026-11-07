@@ -5,22 +5,12 @@
 const { test, after } = require("node:test");
 const assert = require("node:assert/strict");
 const { loadPlugin, connect } = require("./harness");
-const { makePark, addWorld, LAND_Z } = require("./fixtures");
+const { makePark, addWorld, LAND_Z, MAP } = require("./fixtures");
 
 const PORT = 27780 + Math.floor(Math.random() * 1000);
 const ALICE = 1;
 
-// Path along y=2 from the park entrance at (1,2); Burger Bar 1 (ride 7) at (3,3). Free sites:
-// (1,1) (6,1) (7,1) (8,1) facing +y, (1,3) (2,3) (4,3) (6,3) (8,3) facing -y, (9,2) facing -x.
-// Not sites: tree, water, slope, raised land, the ride, the queue, unowned land, and land with no path next to it.
-const MAP = [
-    "uuuuuuuuuuu",
-    "u.t~/^...uu",
-    "uE#######.u",
-    "u..7.=.u..u",
-    "u.........u",
-    "uuuuuuuuuuu",
-];
+// Free sites on MAP, by position.
 const SITES = [[1, 1], [1, 3], [2, 3], [4, 3], [6, 1], [6, 3], [7, 1], [8, 1], [8, 3], [9, 2]];
 
 function start(port, opts = {}) {
@@ -198,6 +188,16 @@ test("write tools need the helper to enable building, and never run from !tool",
             "!tool only shows park data; demolish changes the park, use !build instead.",
         ]);
         assert.equal(off.g.map.getRide(7).name, "Burger Bar 1");
+
+        // The chat commands say so too, and !help leaves them out.
+        const chatFrom = off.plugin.sent.length;
+        off.plugin.chat(ALICE, "!build a burger bar");
+        off.plugin.chat(ALICE, "!yes");
+        off.plugin.chat(ALICE, "!help");
+        await off.plugin.waitFor(() => off.plugin.repliesTo(ALICE, chatFrom).length >= 3);
+        const [build, yes, help] = off.plugin.repliesTo(ALICE, chatFrom);
+        assert.deepEqual([build, yes], ["Building is turned off on this server.", "Building is turned off on this server."]);
+        assert.doesNotMatch(help, /!build/);
 
         // A helper that reconnects without the build flag turns building off again.
         const on = await connect(port, { build: true });

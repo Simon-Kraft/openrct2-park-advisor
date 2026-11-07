@@ -108,6 +108,18 @@ const RIDE_OBJECTS = [
     ["rct2.ride.mgr1", "Merry-Go-Round", 33],
 ];
 
+// Path along y=2 from the park entrance at (1,2); Burger Bar 1 (ride 7) at (3,3). Free sites:
+// (1,1) (6,1) (7,1) (8,1) facing +y, (1,3) (2,3) (4,3) (6,3) (8,3) facing -y, (9,2) facing -x.
+// Not sites: tree, water, slope, raised land, the ride, the queue, unowned land, and land with no path next to it.
+const MAP = [
+    "uuuuuuuuuuu",
+    "u.t~/^...uu",
+    "uE#######.u",
+    "u..7.=.u..u",
+    "u.........u",
+    "uuuuuuuuuuu",
+];
+
 const err = (error, errorMessage, title = "Can’t construct this here…") => ({ error, errorTitle: title, errorMessage, cost: 0 });
 
 /**
@@ -117,8 +129,9 @@ const err = (error, errorMessage, title = "Can’t construct this here…") => (
  *   u  unowned land       t  tree         E  park entrance (centre)    ^  owned land one step up
  *   0-9  a track tile of the park's ride with that id (also its station start)
  * opts.guests: [[x, y, count]] puts guests in the park on those tiles.
- * Returns {actions, calls, failOnExecute}: pass `actions` to loadPlugin; `calls` records every
- * query/execute; set failOnExecute[name] = result to make the next execute of that action fail.
+ * Returns {actions, calls, failOnExecute, costs, tiles}: pass `actions` to loadPlugin; `calls` records
+ * every query/execute; set failOnExecute[name] = result to make the next execute of that action fail;
+ * `costs` (track cost per ride type, internal units) can be changed; tiles(x, y) gives a tile's elements.
  */
 function addWorld(g, rows, opts = {}) {
     const tiles = [];
@@ -173,7 +186,8 @@ function addWorld(g, rows, opts = {}) {
     const rides = g.map.rides;
     const calls = [];
     const failOnExecute = {};
-    const trackCost = (type) => TRACK_COST[type] || 3000;
+    const costs = { ...TRACK_COST, ...(opts.costs || {}) };
+    const trackCost = (type) => costs[type] || 3000;
 
     function check(name, a) {
         const target = g.map.getRide(a.ride);
@@ -270,7 +284,7 @@ function addWorld(g, rows, opts = {}) {
             return res;
         },
     };
-    return { actions, calls, failOnExecute, tiles: at };
+    return { actions, calls, failOnExecute, costs, tiles: at };
 }
 
 // Plain copy of an object made inside the plugin's sandbox, for deepStrictEqual.
@@ -281,4 +295,4 @@ function guestAt(x, y) {
         nausea: 32, toilet: 64, cash: 200, thoughts: [], x: x * 32 + 16, y: y * 32 + 16, z: LAND_Z };
 }
 
-module.exports = { makePark, ride, addWorld, MONEY_UNDEFINED, LAND_Z };
+module.exports = { makePark, ride, addWorld, MONEY_UNDEFINED, LAND_Z, MAP };
