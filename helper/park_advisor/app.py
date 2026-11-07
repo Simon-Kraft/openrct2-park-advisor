@@ -142,7 +142,7 @@ class Advisor:
         if self.builder is None:
             await self.bridge.say(player, "Building is turned off on this server.")
         elif kind == "no":
-            await self.bridge.say(player, self.builder.cancel(name))
+            await self.bridge.say(player, await self.builder.cancel(name))
         elif kind == "build":
             text = text.strip()[:MAX_QUESTION]
             await self.respond(player, name, lambda: self.builder.propose(player, name, text))

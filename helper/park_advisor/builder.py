@@ -11,6 +11,7 @@ import re
 import time
 from dataclasses import dataclass, field, replace
 
+from .agent import plain_text
 from .bridge import BridgeError
 from .llm import LLMError
 
@@ -70,8 +71,9 @@ PARSE_SCHEMA = {
         "near": {"type": ["string", "null"]},
         "price_pref": {"enum": list(PRICE_PREFS)},
         "open": {"enum": list(OPEN_PREFS)},
+        "language": {"type": "string"},
     },
-    "required": ["kind", "category", "near", "price_pref", "open"],
+    "required": ["kind", "category", "near", "price_pref", "open", "language"],
 }
 PARSE_PROMPT = """\
 You turn a RollerCoaster Tycoon 2 player's build request into JSON. Fields:
@@ -83,7 +85,10 @@ any if the player did not say what.
 - near: the name of a ride the player wants it next to, copied exactly from the request, or null.
 - price_pref: free, cheap, standard or premium if the player asked for a price level, else unspecified.
 - open: closed if the player wants it kept closed, open if they asked for it open, else unspecified.
+- language: the two-letter code of the request's language, e.g. en or de.
 The request can be in any language."""
+
+TRANSLATE_PROMPT = """Translate the game chat message into the language with the code {lang}. Keep every name, number, price and coordinate, and the commands !build, !yes, !no and !undo, exactly as they are. Reply with the translation only, as one line of plain text."""
 
 PRICE_OPTIONS = {
     "free": "Free, no charge",
@@ -104,6 +109,7 @@ POLICIES = {
 POLICY_OPTIONS = {
     "near_busy": "Where many guests walk by",
     "near_junction": "At a path junction where several paths meet",
+    "none": "No wish about where it goes",   # without it, a request with no hint still picked one of the two
 }
 POLICY_TEXT = {"near_busy": "where many guests walk by", "near_junction": "at a path junction"}
 DEFAULT_POLICY = "near_busy"
@@ -122,6 +128,7 @@ class BuildRequest:
     near: str | None = None
     price_pref: str = "unspecified"
     open: str = "unspecified"
+    language: str = "en"
     object: str | None = None   # an exact stall name from the request wins over any choice
 
 
@@ -153,7 +160,9 @@ def validate_request(data) -> BuildRequest | None:
     if (data.get("kind") not in KINDS or data.get("category") not in CATEGORIES or data.get("price_pref") not in PRICE_PREFS
             or data.get("open") not in OPEN_PREFS or not (near is None or isinstance(near, str))):
         return None
-    return BuildRequest(data["kind"], data["category"], (near or "").strip() or None, data["price_pref"], data["open"])
+    lang = str(data.get("language") or "en").strip().lower()
+    return BuildRequest(data["kind"], data["category"], (near or "").strip() or None, data["price_pref"], data["open"],
+                        lang if re.fullmatch(r"[a-z]{2,3}", lang) else "en")
 
 
 def parse_keywords(text: str) -> BuildRequest:
@@ -221,6 +230,7 @@ class Builder:
         self.pending: dict[str, Proposal] = {}
         self.built: list[Built] = []
         self.currency: dict = {}
+        self.language: dict[str, str] = {}   # per player, from their last !build
 
     async def tool(self, name: str, args: dict):
         res = await self.run_tool(name, args)
@@ -252,6 +262,9 @@ class Builder:
     # ------------------------------------------------------------ !build
 
     async def propose(self, player: int, name: str, text: str) -> str:
+        return await self.localize(name, await self._propose(player, name, text))
+
+    async def _propose(self, player: int, name: str, text: str) -> str:
         why = await self.refusal(player)
         if why:
             return why
@@ -260,6 +273,7 @@ class Builder:
         objects = info["objects"]
         rides = await self.tool("list_rides", {})
         req = await self.parse(text, objects, rides)
+        self.language[name.lower()] = req.language
         log.info("build request from %s: %s", name, req)
         if req.kind == "flat_ride":
             return "Sorry, I can only build stalls so far, not rides. " + HELP_TEXT
@@ -374,11 +388,15 @@ class Builder:
     async def choose_policy(self, text: str) -> str:
         if not self.cfg.build_choose_policy:
             return DEFAULT_POLICY
-        return await self.choose(text, "Where should the stall go?", POLICY_OPTIONS, DEFAULT_POLICY)
+        pick = await self.choose(text, "Where should the stall go?", POLICY_OPTIONS, DEFAULT_POLICY)
+        return DEFAULT_POLICY if pick == "none" else pick
 
     # ------------------------------------------------------------ !yes, !no, !undo
 
     async def confirm(self, player: int, name: str) -> str:
+        return await self.localize(name, await self._confirm(player, name))
+
+    async def _confirm(self, player: int, name: str) -> str:
         p = self.pending.pop(name.lower(), None)
         if p is None:
             return "You have no proposal waiting. Use !build first."
@@ -405,12 +423,15 @@ class Builder:
         return (f"Built {r['name']} at ({p.site['x']},{p.site['y']}) {p.where}, {details}, for "
                 f"{fmt_money(r['cost'], self.currency)}. Type !undo to remove it.")
 
-    def cancel(self, name: str) -> str:
+    async def cancel(self, name: str) -> str:
         if self.pending.pop(name.lower(), None) is None:
-            return "You have no proposal waiting."
-        return "OK, cancelled."
+            return await self.localize(name, "You have no proposal waiting.")
+        return await self.localize(name, "OK, cancelled.")
 
     async def undo(self, player: int, name: str) -> str:
+        return await self.localize(name, await self._undo(player, name))
+
+    async def _undo(self, player: int, name: str) -> str:
         res = await self.run_tool("get_player_info", {"player": player})
         admin = bool(res.get("ok") and res["result"].get("is_admin"))
         mine = [b for b in self.built if admin or b.owner == name.lower()]
@@ -427,3 +448,23 @@ class Builder:
         log.info("undo: demolished %s (ride %s) for %s", last.name, last.ride_id, name)
         return f"Removed {last.name}, the park got {fmt_money(res['result']['refund'], self.currency)} back."
 
+    async def localize(self, name: str, text: str) -> str:
+        """The reply in the player's language. The translation is only used if every number and
+        command survived it; otherwise the English text goes out."""
+        lang = self.language.get(name.lower(), "en")
+        if lang == "en" or self.llm is None:
+            return text
+        prompt = TRANSLATE_PROMPT.format(lang=lang)
+        try:
+            reply = await self.llm.complete([{"role": "system", "content": prompt}, {"role": "user", "content": text}])
+        except LLMError as e:
+            log.warning("translation to %s failed: %s", lang, e)
+            return text
+        out = plain_text(reply.content)
+        keep = re.findall(r"\d+(?:[.,]\d+)*|![a-z]+", text)
+        swap = str.maketrans(".,", ",.")   # "3.50" may become "3,50" in German
+        lost = [k for k in keep if k not in out and k.translate(swap) not in out]
+        if not out or lost:
+            log.info("translation to %s dropped %s, sending English: %s", lang, lost, out)
+            return text
+        return out

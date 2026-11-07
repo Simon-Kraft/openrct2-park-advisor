@@ -52,6 +52,9 @@ With `BUILD_ENABLED=true` players can ask the bot to build stalls: food, drinks,
 1. The chat model fills a small form from the request (category, price wish, a ride to build near, open or closed). If it fails, a few keywords still work, and an exact stall name always does.
 2. The decision model picks between the matching stalls and a price level when the request doesn't say.
 3. Plain code finds the spot: free, flat land the park owns, facing a path, near the named ride or where many guests walk by. It checks the build with the game first, and the plugin removes a half-built stall if a step fails.
+4. Replies come in the language of the request. The chat model translates them, and a translation that changes a number or a command is replaced by the English text.
+
+With `qwen3:8b` and `tev1:0.8b` a proposal takes about 3 seconds in English and 7 in other languages (one more model call).
 
 Only admins can build, plus the groups in `BUILD_ALLOWED_GROUPS`. Builds are limited per player per hour, by cost, and by a cash reserve the park keeps; see `.env.example`. The plugin's game actions run as the server host, so these checks happen in the helper. What the bot built is remembered only while the helper runs.
 

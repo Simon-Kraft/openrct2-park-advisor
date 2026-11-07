@@ -141,7 +141,8 @@ class FakeLLM:
     """Deterministic stand-in for tests: echoes the question plus a short summary of the park data
     sections in the prompt. Markers trigger edge cases: #fail (API error), #ratelimit, #slow (hangs),
     #markdown (formatted answer with emojis), #long (very long answer).
-    complete_json fills the build form from a few words; #badjson returns a broken form."""
+    complete_json fills the build form from a few words; #badjson returns a broken form, #xx a
+    language whose translations lose all numbers. Translations come back as "[lang] text"."""
 
     # A deliberately different word list than the builder's keyword fallback, so tests can tell
     # which one parsed a request ("munchies" only the fake model knows).
@@ -160,7 +161,9 @@ class FakeLLM:
         what = q[:near.start()] + q[near.end():] if near else q   # "near the Burger Bar" is not a burger
         category = next((c for c, pat in self.FORM_WORDS if re.search(pat, what)), None)
         price = next((t for t in ("free", "cheap", "premium") if t in q), "unspecified")
+        lang = "xx" if "#xx" in q else "de" if re.search(r"\b(bau|bitte|eine?n?|neben)\b", q) else "en"
         return {
+            "language": lang,
             "kind": "stall" if category else "flat_ride" if "carousel" in what else "unknown",
             "category": category or "any",
             "near": near.group(1).strip() if near else None,
@@ -169,6 +172,11 @@ class FakeLLM:
         }
 
     async def complete(self, messages: list[dict]) -> Reply:
+        if messages[0]["content"].startswith("Translate"):
+            # "[de] ..." stands for a translation; for "xx" it loses the numbers, which must be caught.
+            lang = re.search(r"code (\w+)", messages[0]["content"]).group(1)
+            text = messages[-1]["content"]
+            return Reply(f"[{lang}] " + (re.sub(r"\d", "", text) if lang == "xx" else text))
         last_user = max(i for i, m in enumerate(messages) if m["role"] == "user")
         question = messages[last_user]["content"]
         history = sum(1 for m in messages[:last_user] if m["role"] == "user")

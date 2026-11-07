@@ -188,3 +188,14 @@ test("a slow model ends with the usual timeout, and one request at a time", asyn
     await plugin.waitFor(() => plugin.repliesTo(ALICE, from).length >= 3, 6000, "timeout message");
     assert.equal(plugin.repliesTo(ALICE, from)[2], "Sorry, that took too long. Please try again.");
 });
+
+test("replies come in the request's language, unless the translation loses a number", async () => {
+    assert.match(await build(ALICE, "bitte eine Burger Bar"), /^\[de\] Proposal: Burger Bar at \(\d+,\d+\) .* Type !yes to build or !no to cancel\.$/);
+    assert.equal(await say(ALICE, "!no"), "[de] OK, cancelled.");
+    // The "xx" translation drops digits, so the proposal goes out in English; a reply without numbers is still translated.
+    assert.match(await build(ALICE, "a burger bar #xx"), /^Proposal: Burger Bar at \(\d+,\d+\)/);
+    assert.match(helper.output, /translation to xx dropped/);
+    assert.equal(await say(ALICE, "!no"), "[xx] OK, cancelled.");
+    assert.match(await build(ALICE, "a burger bar"), /^Proposal/);
+    assert.equal(await say(ALICE, "!no"), "OK, cancelled.");
+});
