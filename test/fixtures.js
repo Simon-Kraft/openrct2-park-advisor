@@ -37,7 +37,7 @@ function makePark() {
             totalAirTime: 1.5, numDrops: 6, numLiftHills: 1, highestDropHeight: 28,
         }),
         ride({ id: 3, name: "New Coaster 1", object: { name: "Steel Twister" }, status: "testing", runningCost: MONEY_UNDEFINED }),
-        ride({ id: 4, name: "Merry-Go-Round 1", object: { name: "Merry-Go-Round" }, status: "closed", breakdown: "safety_cut_out", excitement: 120, intensity: 50, nausea: 0 }),
+        ride({ id: 4, name: "Merry-Go-Round 1", object: { name: "Merry-Go-Round", identifier: "rct2.ride.mgr1" }, status: "closed", breakdown: "safety_cut_out", excitement: 120, intensity: 50, nausea: 0 }),
         ride({ id: 7, name: "Burger Bar 1", type: 28, object: { name: "Burger Bar", identifier: "rct2.ride.burgb" }, classification: "stall", price: [15], totalCustomers: 300, totalProfit: 1200, satisfaction: 40, runningCost: 25 }),
         ride({ id: 8, name: "Toilets 1", type: 36, object: { name: "Toilets", identifier: "rct2.ride.tlt1" }, classification: "facility", price: [0] }),
     ];
@@ -95,9 +95,11 @@ function makePark() {
 
 const LAND_Z = 112;
 const STALL_TRACK = 262;
-const TRACK_COST = { 28: 3000, 30: 3000, 32: 2000, 33: 4600 };   // internal units, per ride type
+const TRACK_COST = { 28: 3000, 30: 3000, 32: 2000, 33: 4600, 46: 3600 };   // internal units, per ride type
 const STALL_TYPES = [28, 30, 32];
 const FACILITY_TYPES = [35, 36, 45, 48];
+const FLAT = { 258: [2, 0], 259: [4, 0], 266: [3, 1] };   // track type: footprint size, origin offset from its corner
+const DELTA = [[-1, 0], [0, 1], [1, 0], [0, -1]];
 
 const RIDE_OBJECTS = [
     ["rct2.ride.burgb", "Burger Bar", 28], ["rct2.ride.hotds", "Hot Dog Stall", 28],
@@ -105,7 +107,8 @@ const RIDE_OBJECTS = [
     ["rct2.ride.balln", "Balloon Stall", 32], ["rct2.ride.tshrt", "T-Shirt Stall", 32],
     ["rct2.ride.infok", "Information Kiosk", 35], ["rct2.ride.tlt1", "Restroom", 36],
     ["rct2.ride.atm1", "ATM", 45, false], ["rct2.ride.faid1", "First Aid Room", 48],
-    ["rct2.ride.mgr1", "Merry-Go-Round", 33],
+    ["rct2.ride.mgr1", "Merry-Go-Round", 33], ["rct2.ride.twist1", "Twist", 46], ["rct2.ride.hskelt", "Spiral Slide", 21],
+    ["rct2.ride.dodg1", "Bumper Cars", 25], ["rct2.ride.fwh1", "Ferris Wheel", 37], ["rct2.ride.circus1", "Circus", 49, false],
 ];
 
 // Path along y=2 from the park entrance at (1,2); Burger Bar 1 (ride 7) at (3,3). Free sites:
@@ -118,6 +121,18 @@ const MAP = [
     "u..7.=.u..u",
     "u.........u",
     "uuuuuuuuuuu",
+];
+
+// Room for flat rides: free land in y=1..3, a row y=4 for entrances and exits (with a tree at
+// (5,4)), and a path along y=5 from the park entrance at (1,5).
+const FLAT_MAP = [
+    "uuuuuuuuuuuu",
+    "u..........u",
+    "u..........u",
+    "u..........u",
+    "u....t.....u",
+    "uE#########u",
+    "uuuuuuuuuuuu",
 ];
 
 const err = (error, errorMessage, title = "Can’t construct this here…") => ({ error, errorTitle: title, errorMessage, cost: 0 });
@@ -160,7 +175,6 @@ function addWorld(g, rows, opts = {}) {
         }
     }
     // Path edges join neighbouring paths, like the game's auto-connect.
-    const DELTA = [[-1, 0], [0, 1], [1, 0], [0, -1]];
     const pathAt = (x, y) => (at(x, y) || []).find((e) => e.type === "footpath");
     for (let x = 0; x < size.x; x++) {
         for (let y = 0; y < size.y; y++) {
@@ -202,22 +216,31 @@ function addWorld(g, rows, opts = {}) {
             case "trackplace": {
                 if (!target) return err(1, "Ride not found");
                 if (target.type !== a.rideType) return err(1, "");
-                const tx = a.x / 32, ty = a.y / 32;
-                const els = at(tx, ty);
-                if (!els || !els[0].hasOwnership) return err(2, "Land not owned by park!");
-                const s = els[0];
-                if (s.waterHeight) return err(9, "Cannot build partly above and partly below water!");
-                if (s.slope || a.z < s.baseZ) return err(9, "Raise or lower land first");
-                const block = els.find((e) => e.type !== "surface" && e.type !== "small_scenery");
-                if (block) {
-                    return err(9, block.type === "track" ? g.map.getRide(block.ride).name + " in the way"
-                        : block.type === "footpath" ? "Footpath in the way" : "Something in the way");
+                let scenery = 0;
+                for (const [tx, ty] of footprint(a)) {
+                    const els = at(tx, ty);
+                    if (!els || !els[0].hasOwnership) return err(2, "Land not owned by park!");
+                    const s = els[0];
+                    if (s.waterHeight) return err(9, "Cannot build partly above and partly below water!");
+                    if (s.slope || a.z < s.baseZ) return err(9, "Raise or lower land first");
+                    const block = els.find((e) => e.type !== "surface" && e.type !== "small_scenery");
+                    if (block) return err(9, inTheWay(block));
+                    if (els.some((e) => e.type === "small_scenery")) scenery += 120;
                 }
-                const cost = trackCost(a.rideType) + (els.some((e) => e.type === "small_scenery") ? 120 : 0);
+                const cost = trackCost(a.rideType) + scenery;
                 if (!g.park.getFlag("noMoney") && cost > g.park.cash) {
                     return { ...err(4, `Not enough cash - requires £${(cost / 10).toFixed(2)}`), cost };
                 }
                 return { error: 0, cost, position: { x: a.x + 16, y: a.y + 16, z: a.z }, expenditureType: "ride_construction" };
+            }
+            case "rideentranceexitplace": {
+                if (!target) return err(1, "Ride not found");
+                if (target.status !== "closed") return err(11, "Must be closed first");
+                const els = at(a.x / 32, a.y / 32);
+                if (!els || !els[0].hasOwnership) return err(2, "Land not owned by park!");
+                const block = els.find((e) => e.type !== "surface");
+                if (block) return err(9, inTheWay(block));
+                return { error: 0, cost: 0 };
             }
             case "ridesetprice":
                 if (!target) return err(1, "Ride not found", "Can’t change price…");
@@ -246,25 +269,50 @@ function addWorld(g, rows, opts = {}) {
                 status: "closed", price: [0], stations: [{ queueTime: 0, start: null, entrance: null }],
             }));
         } else if (name === "trackplace") {
-            const els = at(a.x / 32, a.y / 32);
-            els.splice(1, els.length, { type: "track", baseZ: a.z, ride: a.ride, trackType: a.trackType, direction: a.direction });
+            for (const [tx, ty] of footprint(a)) {
+                at(tx, ty).splice(1, 9, { type: "track", baseZ: a.z, ride: a.ride, trackType: a.trackType, direction: a.direction });
+            }
             target.stations[0].start = { x: a.x, y: a.y, z: a.z };
             target.trackCost = res.cost;
             g.park.cash -= res.cost;
+        } else if (name === "rideentranceexitplace") {
+            const tx = a.x / 32, ty = a.y / 32;
+            at(tx, ty).push({ type: "entrance", baseZ: LAND_Z, object: a.isExit ? 1 : 0, ride: a.ride, direction: a.direction });
+            target.stations[0][a.isExit ? "exit" : "entrance"] = { x: a.x, y: a.y, z: LAND_Z, direction: a.direction };
+            // As in the game: the path behind it joins only if the entrance faces the ride.
+            const [dx, dy] = DELTA[a.direction];
+            const p = pathAt(tx - dx, ty - dy);
+            if (p && (at(tx + dx, ty + dy) || []).some((e) => e.type === "track" && e.ride === a.ride)) p.edges |= 1 << a.direction;
         } else if (name === "ridesetprice") {
             target.price[0] = a.price;
         } else if (name === "ridesetstatus") {
             target.status = ["closed", "open", "testing", "simulating"][a.status];
         } else if (name === "ridedemolish") {
             for (const col of tiles) for (const els of col) {
-                const i = els.findIndex((e) => e.type === "track" && e.ride === target.id);
-                if (i >= 0) els.splice(i, 1);
+                for (let i = els.length - 1; i > 0; i--) {
+                    if ((els[i].type === "track" || (els[i].type === "entrance" && els[i].object !== 2)) && els[i].ride === target.id) {
+                        els.splice(i, 1);
+                    }
+                }
             }
             rides.splice(rides.indexOf(target), 1);
             // Like the game: about 70% of the construction cost comes back.
             res.cost = -Math.round((target.trackCost || 0) * 0.7);
             g.park.cash -= res.cost;
         }
+    }
+
+    // Tiles a track piece covers: one for stalls, the whole square for flat rides.
+    function footprint(a) {
+        const [n, off] = FLAT[a.trackType] || [1, 0];
+        const x0 = a.x / 32 - off, y0 = a.y / 32 - off, out = [];
+        for (let dx = 0; dx < n; dx++) for (let dy = 0; dy < n; dy++) out.push([x0 + dx, y0 + dy]);
+        return out;
+    }
+
+    function inTheWay(e) {
+        return e.type === "track" || e.type === "entrance" && e.object !== 2 ? g.map.getRide(e.ride).name + " in the way"
+            : e.type === "footpath" ? "Footpath in the way" : "Something in the way";
     }
 
     const actions = {
@@ -295,4 +343,4 @@ function guestAt(x, y) {
         nausea: 32, toilet: 64, cash: 200, thoughts: [], x: x * 32 + 16, y: y * 32 + 16, z: LAND_Z };
 }
 
-module.exports = { makePark, ride, addWorld, MONEY_UNDEFINED, LAND_Z, MAP };
+module.exports = { makePark, ride, addWorld, MONEY_UNDEFINED, LAND_Z, MAP, FLAT_MAP };

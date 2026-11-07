@@ -164,8 +164,8 @@ class FakeLLM:
         lang = "xx" if "#xx" in q else "de" if re.search(r"\b(bau|bitte|eine?n?|neben)\b", q) else "en"
         return {
             "language": lang,
-            "kind": "stall" if category else "flat_ride" if "carousel" in what else "unknown",
-            "category": category or "any",
+            "kind": "stall" if category else "flat_ride" if re.search(r"carousel|merry|twist|ride\b|ferris", what) else "unknown",
+            "category": category or ("thrill" if "thrill" in what else "any"),
             "near": near.group(1).strip() if near else None,
             "price_pref": "premium" if "expensive" in q else price,
             "open": "closed" if "closed" in q else "unspecified",

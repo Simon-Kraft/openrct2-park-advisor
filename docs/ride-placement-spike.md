@@ -80,12 +80,12 @@ Stalls (all `flatTrack1x1A` = 262 except the kiosk). Object ids as loaded in thi
 | ATM | 45 | `rct2.ride.atm1` | 262 | source |
 | first aid | 48 | `rct2.ride.faid1` | 262 | source |
 
-Flat rides (milestone 5; source unless noted): merry-go-round 33 / `mgr1` / 3x3 = 266 (`trackplace` query succeeded, cost 4600),
-twist 46 / `twist1` / 266, circus 49 / 266, haunted house 47 / 266, space rings 41 / 266, top spin / 266,
+Flat rides (source unless noted): merry-go-round 33 / `mgr1` / 3x3 = 266 (built, cost 4600), twist 46 / `twist1` / 266
+(built, cost 3600), circus 49 / 266, haunted house 47 / 266, space rings 41 / 266, top spin / 266,
 spiral slide 21 / `hskelt` / 2x2 = 258, dodgems 25 / `dodg1` / 4x4 = 259, ferris wheel 37 / `fwh1` / 1x4C = 265,
 magic carpet 77 / 1x4A = 257, pirate ship 26 / `swsh1` / 1x5 = 261, swinging inverter ship 27 / 1x4B = 263.
 For flat rides `entranceObject` is a station object index (`objectManager.getAllObjects("station")`; index 0 =
-`rct2.station.plain` here). Which tile of a multi-tile footprint `x`/`y` refer to, and entrance/exit placement, were **untested**.
+`rct2.station.plain` here). See "Flat rides" below for placement.
 
 ## The game validates less than expected (observed)
 
@@ -143,6 +143,25 @@ A `ridecreate` **query** also returns `ride`: the id the next ride would get.
 - Demolishing the finished stall refunded 2099 of the 3000 (`cost: -2099`), but the **query** for it reported cost 0,
   so the refund for `!undo` is only known after executing.
 
+## Flat rides (observed, milestone 5)
+
+Built a merry-go-round and a twist in the copied park. Guests rode the merry-go-round once its entrance faced the right way.
+
+- **Footprint origin:** a 3x3 ride is placed by its **centre** tile: `trackplace` at the centre covers centre ±1, in every
+  direction (origins whose footprint touched the path were refused, the others accepted). From `TED.FlatRide.h`: 2x2 and
+  4x4 are placed by their lowest corner, covering +0..+1 and +0..+3 for direction 0. The plugin always uses direction 0.
+- **Entrance and exit face the ride**, the opposite of stalls. With the direction pointing from the entrance toward the ride,
+  `rideentranceexitplace` joins the path behind it (its `edges` gained the bit). With the direction pointing at the path,
+  placement succeeds, the ride opens, and no guest ever comes (none in 3 minutes, against 2 riders a minute after the fix).
+  The `queryAction` accepts any direction on any tile, so the plugin checks this itself.
+- Every outer edge of a square footprint takes an entrance (`TED.FlatRide.h` connection sides).
+- Entrances and exits cost nothing; changing them needs the ride closed ("Must be closed first"). A new ride starts closed.
+- A ride opens without testing.
+- `ridedemolish` removes the entrance and exit with the ride; the twist refunded 2519 of 3600.
+- Ride ticket prices can be set in parks with free entry. Parks that charge entry keep tickets free unless prices are
+  unlocked; the plugin reports this as `ride_prices` and the helper then leaves the ticket price alone.
+- Not square, so not built yet: ferris wheel, swinging ships, magic carpet (their sizes and entrance sides depend on direction).
+
 ## Answers to the plan's open questions (section 9)
 
 1. **Permissions, cash, attribution.** Plugin actions are **not permission-checked**: group permissions are only enforced in
@@ -162,7 +181,8 @@ A `ridecreate` **query** also returns `ride`: the id the next ride would get.
    same ride type, also run the `trackplace` query with it as a placeholder. The real build rolls back with
    `ridedemolish` on any failure, which was shown to leave nothing behind.
 4. **Path adjacency and entrances with `queryAction` only: no.** The game accepts a stall with no path next to it and in
-   any direction, so adjacency must be checked in plugin code. Entrance placement for flat rides was **untested** (milestone 5).
+   any direction, so adjacency must be checked in plugin code. The same goes for flat ride entrances: the query accepts any
+   direction, and only an entrance facing the ride joins the path (see Flat rides).
 5. **Scan performance (observed):** reading every tile's elements and their surface fields took 8 ms on 103x103
    (10,609 tiles) and 42 ms on the same park enlarged to 254x254 (64,516 tiles). That is fine on `!build`, not on every tick.
 6. **Save/reload: untested.** Ride ids are stored in the save; the helper's undo stack and proposals are in memory only,

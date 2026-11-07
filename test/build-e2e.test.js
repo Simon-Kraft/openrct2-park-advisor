@@ -113,11 +113,13 @@ test("stalls without a price, and the decision model picking among several", asy
 
 test("requests it can't build, and fallbacks when the model fails", async () => {
     assert.equal(await build(ALICE, "a giant roller coaster"),
-        "I can build stalls, e.g. !build a cheap burger bar near the Big Dipper, or !build a toilet.");
-    assert.match(await build(ALICE, "a carousel"), /^Sorry, I can only build stalls so far, not rides\./);
+        "I can build stalls and small rides, e.g. !build a cheap burger bar near the Big Dipper, or !build a merry-go-round.");
+    // MAP has no room for a 3x3 ride (the flat ride tests use another map).
+    assert.equal(await build(ALICE, "a carousel"),
+        "I found no free, flat 3x3 spot with a row for the entrance and exit next to a path. Clear some space or buy land first.");
     assert.equal(await build(ALICE, "an ATM"),
-        "The park has no ATM researched yet. It can build: Balloon Stall, Burger Bar, Drinks Stall, First Aid Room, "
-        + "Hot Dog Stall, Information Kiosk, Restroom, T-Shirt Stall.");
+        "The park has no ATM researched yet. It can build: Balloon Stall, Bumper Cars, Burger Bar, Drinks Stall, First Aid Room, "
+        + "Hot Dog Stall, Information Kiosk, Merry-Go-Round, Restroom, Spiral Slide, T-Shirt Stall, Twist.");
     // Only the fake model knows "munchies"; when it fails, the keyword fallback still knows "hungry".
     assert.match(await build(ALICE, "munchies please"), /^Proposal: Burger Bar/);
     assert.match(await build(ALICE, "munchies please #badjson"), /^I can build stalls/);

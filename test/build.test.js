@@ -5,7 +5,7 @@
 const { test, after } = require("node:test");
 const assert = require("node:assert/strict");
 const { loadPlugin, connect } = require("./harness");
-const { makePark, addWorld, LAND_Z, MAP } = require("./fixtures");
+const { makePark, addWorld, LAND_Z, MAP, FLAT_MAP } = require("./fixtures");
 
 const PORT = 27780 + Math.floor(Math.random() * 1000);
 const ALICE = 1;
@@ -13,9 +13,9 @@ const ALICE = 1;
 // Free sites on MAP, by position.
 const SITES = [[1, 1], [1, 3], [2, 3], [4, 3], [6, 1], [6, 3], [7, 1], [8, 1], [8, 3], [9, 2]];
 
-function start(port, opts = {}) {
+function start(port, opts = {}, rows = MAP) {
     const g = makePark();
-    const world = addWorld(g, MAP, opts);
+    const world = addWorld(g, rows, opts);
     const plugin = loadPlugin({ port, globals: g, actions: world.actions });
     return { g, world, plugin };
 }
@@ -71,7 +71,9 @@ test("find_sites: limit, sorting and near_ride", async () => {
 
     assert.equal((await call("find_sites", { near_ride: 99 })).error, "no ride with id 99");
     assert.equal((await call("find_sites", { sort: "price" })).error, "unknown sort price");
-    assert.equal((await call("find_sites", { width: 3, height: 3 })).error, "only 1x1 sites are supported");
+    assert.equal((await call("find_sites", { width: 3, height: 2 })).error, "only square sites are supported");
+    assert.equal((await call("find_sites", { width: 5, height: 5 })).error, "no ride has a 5x5 footprint");
+    assert.equal((await ok("find_sites", { width: 3, height: 3 })).total, 0);   // no room for one on MAP
 });
 
 test("get_buildable lists researched objects, get_player_info tells admins apart", async () => {
@@ -81,7 +83,7 @@ test("get_buildable lists researched objects, get_player_info tells admins apart
         { object: "rct2.ride.hotds", name: "Hot Dog Stall", ride_type: 28 },
     ]);   // Cotton Candy and ATM are not researched
     assert.deepEqual([b.cash, b.no_money, b.max_price], [12345.6, false, 20]);
-    assert.equal((await ok("get_buildable", {})).objects.length, 9);
+    assert.equal((await ok("get_buildable", {})).objects.length, 13);
 
     assert.deepEqual(await ok("get_player_info", { player: 0 }), { id: 0, name: "Server", group: "Admin", is_admin: true });
     assert.deepEqual(await ok("get_player_info", { player: ALICE }), { id: 1, name: "Alice", group: "Guest", is_admin: false });
@@ -210,5 +212,67 @@ test("write tools need the helper to enable building, and never run from !tool",
         assert.equal((await again.call("build", stall({ dry_run: true }))).error, "building is disabled");
     } finally {
         off.plugin.close();
+    }
+});
+
+test("flat rides: square sites with an entrance and exit facing the ride, and the build steps", async () => {
+    const port = PORT + 2;
+    const flat = start(port, {}, FLAT_MAP);
+    try {
+        const c = await connect(port, { build: true });
+        others.push(c);
+        const sites = (await c.call("find_sites", { width: 3, height: 3, limit: 100 })).result;
+        // The 3x3 rides fit in y=1..3 at x=1..8; their entrances and exits are on y=4, facing up at the ride.
+        assert.deepEqual(sites.sites.map((s) => [s.x, s.y]), [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1], [6, 1], [7, 1], [8, 1]]);
+        for (const s of sites.sites) {
+            for (const t of [s.entrance, s.exit]) {
+                assert.equal(t.y, 4);
+                assert.equal(t.direction, 3);
+                assert.ok(t.x >= s.x && t.x < s.x + 3);
+                assert.ok(!(t.x === 5 && t.y === 4), "never on the tree");
+            }
+            assert.notEqual(s.entrance.x, s.exit.x);
+        }
+        const site = sites.sites[2];
+        assert.deepEqual([site.entrance, site.exit], [{ x: 3, y: 4, direction: 3 }, { x: 4, y: 4, direction: 3 }]);
+        assert.equal((await c.call("find_sites", { width: 4, height: 4 })).result.total, 0);
+        // 2x2 at x=1..9, less the two whose front row has the tree: both front tiles are needed.
+        assert.equal((await c.call("find_sites", { width: 2, height: 2 })).result.total, 7);
+
+        const twist = { object: "rct2.ride.twist1", ride_type: 46, track_type: 266, x: site.x, y: site.y, z: LAND_Z,
+            entrance: site.entrance, exit: site.exit, price: 1, open: true, player: ALICE };
+        assert.deepEqual((await c.call("build", { ...twist, dry_run: true })).result, { dry_run: true, cost: null, cash: 12345.6 });
+        const bad = {
+            "the entrance and exit must face the ride": { entrance: { x: 3, y: 4, direction: 1 } },
+            "the entrance and exit need two tiles": { exit: site.entrance },
+            "that spot is not free any more": { x: 4, entrance: { x: 4, y: 4, direction: 3 }, exit: { x: 5, y: 4, direction: 3 } },   // the tree
+            "track type 265 is not supported": { track_type: 265 },
+        };
+        for (const [error, o] of Object.entries(bad)) assert.equal((await c.call("build", { ...twist, dry_run: true, ...o })).error, error);
+
+        const before = flat.world.calls.length;
+        const r = await c.call("build", twist);
+        assert.deepEqual(r.result, { ride_id: 1, name: "Twist 1", cost: 360, status: "open" });
+        const executed = flat.world.calls.slice(before).filter((x) => x.kind === "execute");
+        assert.deepEqual(executed.map((x) => x.name),
+            ["ridecreate", "trackplace", "rideentranceexitplace", "rideentranceexitplace", "ridesetprice", "ridesetstatus"]);
+        assert.deepEqual([executed[1].args.x, executed[1].args.y, executed[1].args.direction], [4 * 32, 2 * 32, 0]);   // by its centre
+        assert.deepEqual(executed[2].args, { x: 96, y: 128, direction: 3, ride: 1, station: 0, isExit: false });
+        assert.equal(executed[3].args.isExit, true);
+        for (let x = 3; x <= 5; x++) for (let y = 1; y <= 3; y++) assert.equal(flat.world.tiles(x, y)[1].ride, 1);
+        // The path behind the entrance joined it.
+        assert.ok(flat.world.tiles(3, 5).find((e) => e.type === "footpath").edges & (1 << 3));
+
+        // A failing entrance rolls back the whole ride; demolish takes the entrance and exit too.
+        const s2 = (await c.call("find_sites", { width: 3, height: 3, limit: 100 })).result.sites.find((s) => s.x >= 6);
+        flat.world.failOnExecute.rideentranceexitplace = { error: 9, errorMessage: "Something in the way", cost: 0 };
+        const failed = await c.call("build", { ...twist, x: s2.x, y: s2.y, entrance: s2.entrance, exit: s2.exit });
+        assert.equal(failed.error, "Something in the way");
+        await flat.plugin.waitFor(() => flat.g.map.rides.length === 6, 2000, "rollback");
+        assert.equal(flat.world.tiles(s2.x + 1, 2).length, 1);
+        assert.equal((await c.call("demolish", { ride_id: 1, name: "Twist 1" })).result.refund, 252);
+        for (const [x, y] of [[3, 4], [4, 4], [4, 2]]) assert.equal(flat.world.tiles(x, y).length, 1);
+    } finally {
+        flat.plugin.close();
     }
 });

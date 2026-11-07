@@ -24,11 +24,16 @@ class RideType:
     track_type: int
     est_cost: float                  # currency; the dry run gives the exact cost when the park has one already
     prices: dict[str, float] | None  # per price tier; None: the game has no price for it
+    size: int = 1                    # footprint, size x size tiles; above 1 it is a flat ride
+    about: str = ""                  # for the decision model, which can't tell a merry-go-round from its name alone
 
 
 TIERS = ("free", "cheap", "standard", "premium")
-# Construction costs seen in the game (spike): food stall 300, souvenir stall 200. The others are
-# guesses on the safe side.
+GENTLE_PRICES = dict(zip(TIERS, (0, 0.5, 1.0, 2.0)))
+THRILL_PRICES = dict(zip(TIERS, (0, 1.0, 1.5, 3.0)))
+# Construction costs seen in the game: food stall 300, souvenir stall 200, merry-go-round 460,
+# twist 360. The others are guesses on the safe side. Flat rides are the square ones the plugin can
+# place (2x2, 3x3, 4x4); ferris wheels, swinging ships and the like are longer than wide.
 RIDE_TYPES = {
     28: RideType("food", 262, 300, dict(zip(TIERS, (0, 1.0, 1.5, 2.5)))),
     30: RideType("drink", 262, 300, dict(zip(TIERS, (0, 0.8, 1.2, 2.0)))),
@@ -37,13 +42,21 @@ RIDE_TYPES = {
     36: RideType("toilet", 262, 300, dict(zip(TIERS, (0, 0.1, 0.2, 0.4)))),
     45: RideType("atm", 262, 300, None),
     48: RideType("first_aid", 262, 300, None),
+    33: RideType("gentle", 266, 460, GENTLE_PRICES, 3, "a carousel with horses going round, for small children"),
+    49: RideType("gentle", 266, 500, GENTLE_PRICES, 3, "a circus show in a tent"),
+    47: RideType("gentle", 266, 500, GENTLE_PRICES, 3, "a spooky walk-through haunted house"),
+    41: RideType("gentle", 266, 500, GENTLE_PRICES, 3, "rings that spin guests around"),
+    21: RideType("gentle", 258, 500, GENTLE_PRICES, 2, "a slide winding down a tower"),
+    25: RideType("gentle", 259, 600, GENTLE_PRICES, 4, "bumper cars, dodgems or autoscooters that crash into each other"),
+    46: RideType("thrill", 266, 360, THRILL_PRICES, 3, "fast spinning arms with cars, a thrill ride"),
 }
 CATEGORY_NAMES = {
     "food": "food stall", "drink": "drinks stall", "souvenir": "souvenir stall", "info": "information kiosk",
-    "toilet": "toilet", "atm": "ATM", "first_aid": "first aid room",
+    "toilet": "toilet", "atm": "ATM", "first_aid": "first aid room", "gentle": "gentle ride", "thrill": "thrill ride",
 }
 KINDS = ("stall", "flat_ride", "unknown")
-CATEGORIES = tuple(CATEGORY_NAMES) + ("thrill", "gentle", "any")
+CATEGORIES = tuple(CATEGORY_NAMES) + ("any",)
+RIDE_CATEGORIES = ("gentle", "thrill")
 PRICE_PREFS = TIERS + ("unspecified",)
 OPEN_PREFS = ("open", "closed", "unspecified")
 
@@ -58,7 +71,8 @@ CATEGORY_WORDS = {
     "atm": r"\batm\b|cash machine|geldautomat|bankomat",
     "first_aid": r"first ?aid|erste ?hilfe|sanitäter",
 }
-FLAT_RIDE_WORDS = r"carousel|merry|ferris|twist|swing|ship|bumper|dodgem|ride\b|karussell|riesenrad|fahrgeschäft"
+FLAT_RIDE_WORDS = r"carousel|merry|ferris|twist|swing|ship|bumper|dodgem|slide|circus|ride\b|karussell|riesenrad|rutsche|fahrgeschäft"
+THRILL_WORDS = r"thrill|wild|intense|scary|spannend|wilde?s?"
 PRICE_WORDS = [("free", r"\bfree\b|gratis|kostenlos|umsonst"), ("cheap", r"cheap|low.?price|günstig|billig"),
                ("premium", r"expensive|premium|pricey|high.?price|teuer")]
 CLOSED_WORDS = r"\bclosed\b|keep it closed|geschlossen|zu lassen"
@@ -78,8 +92,8 @@ PARSE_SCHEMA = {
 PARSE_PROMPT = """\
 You turn a RollerCoaster Tycoon 2 player's build request into JSON. Fields:
 - kind: "stall" for shops, stalls and facilities (food, drinks, souvenirs, information kiosk, toilets, ATM, \
-first aid); "flat_ride" for small rides like a merry-go-round or ferris wheel; "unknown" if it is not a build \
-request or asks for anything else (roller coasters, paths, scenery, staff).
+first aid); "flat_ride" for small rides like a merry-go-round, twist, spiral slide or bumper cars; "unknown" if \
+it is not a build request or asks for anything else (roller coasters, paths, scenery, staff).
 - category: food, drink, souvenir, info, toilet, atm or first_aid for stalls; thrill or gentle for flat rides; \
 any if the player did not say what.
 - near: the name of a ride the player wants it next to, copied exactly from the request, or null.
@@ -105,19 +119,24 @@ POLICIES = {
                   lambda f: f.get("nearby_guests", 0) - 3 * f.get("nearby_stalls", 0) + f.get("path_neighbors", 0)),
     "near_junction": ({"sort": "path_neighbors"},
                       lambda f: 10 * f.get("path_neighbors", 0) + f.get("nearby_guests", 0) - 3 * f.get("nearby_stalls", 0)),
+    # Rides: away from the crowded park entrance and from stalls.
+    "quiet": ({"sort": "dist_park_entrance", "desc": True},
+              lambda f: f.get("dist_park_entrance", 0) - 3 * f.get("nearby_stalls", 0)),
 }
 POLICY_OPTIONS = {
     "near_busy": "Where many guests walk by",
     "near_junction": "At a path junction where several paths meet",
     "none": "No wish about where it goes",   # without it, a request with no hint still picked one of the two
 }
-POLICY_TEXT = {"near_busy": "where many guests walk by", "near_junction": "at a path junction"}
+POLICY_TEXT = {"near_busy": "where many guests walk by", "near_junction": "at a path junction",
+               "quiet": "in a quieter spot away from the park entrance"}
 DEFAULT_POLICY = "near_busy"
+RIDE_POLICY = "quiet"
 
 PICK_MIN = 0.15   # probability from which the decision model's pick is used
 SITES_LIMIT = 40
 DRY_RUN_TRIES = 5
-HELP_TEXT = "I can build stalls, e.g. !build a cheap burger bar near the Big Dipper, or !build a toilet."
+HELP_TEXT = "I can build stalls and small rides, e.g. !build a cheap burger bar near the Big Dipper, or !build a merry-go-round."
 STATE = "An OpenRCT2 park advisor bot builds what a player asks for in their theme park.\n"
 
 
@@ -161,7 +180,13 @@ def validate_request(data) -> BuildRequest | None:
             or data.get("open") not in OPEN_PREFS or not (near is None or isinstance(near, str))):
         return None
     lang = str(data.get("language") or "en").strip().lower()
-    return BuildRequest(data["kind"], data["category"], (near or "").strip() or None, data["price_pref"], data["open"],
+    kind, category = data["kind"], data["category"]
+    # Small models mix the two up now and then; the category is the better hint.
+    if category in RIDE_CATEGORIES:
+        kind = "flat_ride"
+    elif kind == "flat_ride" and category != "any":
+        kind = "stall"
+    return BuildRequest(kind, category, (near or "").strip() or None, data["price_pref"], data["open"],
                         lang if re.fullmatch(r"[a-z]{2,3}", lang) else "en")
 
 
@@ -170,8 +195,8 @@ def parse_keywords(text: str) -> BuildRequest:
     category = next((c for c, pat in CATEGORY_WORDS.items() if re.search(pat, q)), None)
     if category:
         kind = "stall"
-    elif re.search(FLAT_RIDE_WORDS, q):
-        kind, category = "flat_ride", "any"
+    elif re.search(FLAT_RIDE_WORDS, q) or re.search(THRILL_WORDS, q):
+        kind, category = "flat_ride", "thrill" if re.search(THRILL_WORDS, q) else "any"
     else:
         kind, category = "unknown", "any"
     price = next((t for t, pat in PRICE_WORDS if re.search(pat, q)), "unspecified")
@@ -179,7 +204,7 @@ def parse_keywords(text: str) -> BuildRequest:
 
 
 def exact_object(text: str, objects: list[dict], rides: list[dict]) -> dict | None:
-    """The longest available stall name in the request, not counting the park's ride names
+    """The longest available stall or ride name in the request, not counting the park's ride names
     ("a drinks stall near Burger Bar 1" is not a burger bar)."""
     q = text.lower()
     for name in sorted((r["name"].lower() for r in rides if r.get("name")), key=len, reverse=True):
@@ -268,29 +293,37 @@ class Builder:
         why = await self.refusal(player)
         if why:
             return why
-        info = await self.tool("get_buildable", {"ride_types": list(RIDE_TYPES)})
+        # Everything researched, so an exact name of something it can't build gets a clear answer.
+        info = await self.tool("get_buildable", {})
         self.currency = info.get("currency") or {}
-        objects = info["objects"]
+        everything = info["objects"]
+        objects = [o for o in everything if o["ride_type"] in RIDE_TYPES]
         rides = await self.tool("list_rides", {})
-        req = await self.parse(text, objects, rides)
+        req = await self.parse(text, everything, rides)
         self.language[name.lower()] = req.language
         log.info("build request from %s: %s", name, req)
-        if req.kind == "flat_ride":
-            return "Sorry, I can only build stalls so far, not rides. " + HELP_TEXT
         if req.kind == "unknown":
             return HELP_TEXT
+        unsupported = next((o for o in everything if o["object"] == req.object and o["ride_type"] not in RIDE_TYPES), None)
+        if unsupported:
+            rides_here = ", ".join(sorted({o["name"] for o in objects if RIDE_TYPES[o["ride_type"]].size > 1})) or "none yet"
+            return f"Sorry, I can't build a {unsupported['name']}. I can build stalls and these rides: {rides_here}."
 
+        flat = req.kind == "flat_ride"
         if req.object:
             candidates = [o for o in objects if o["object"] == req.object]
         else:
-            candidates = [o for o in objects if req.category == "any" or RIDE_TYPES[o["ride_type"]].category == req.category]
+            candidates = [o for o in objects if (RIDE_TYPES[o["ride_type"]].size > 1) == flat
+                          and req.category in ("any", RIDE_TYPES[o["ride_type"]].category)]
         if not candidates:
             have = ", ".join(sorted({o["name"] for o in objects})) or "nothing yet"
-            return f"The park has no {CATEGORY_NAMES.get(req.category, 'stall')} researched yet. It can build: {have}."
+            what = CATEGORY_NAMES.get(req.category, "ride" if flat else "stall")
+            return f"The park has no {what} researched yet. It can build: {have}."
         obj = await self.choose_object(text, candidates)
         rtype = RIDE_TYPES[obj["ride_type"]]
         price = None
-        if rtype.prices is not None:
+        # Parks that charge for entry keep ride tickets free; stalls always have prices.
+        if rtype.prices is not None and (rtype.size == 1 or info.get("ride_prices")):
             tier = await self.choose_tier(text, req.price_pref)
             price = min(rtype.prices[tier], info["max_price"])
 
@@ -299,17 +332,21 @@ class Builder:
         if req.near and not target:
             note = f" I couldn't find a ride called {req.near}, so I picked a good spot instead."
         found = None
+        size = {"width": rtype.size, "height": rtype.size}
         if target:
-            found = await self.tool("find_sites", {"limit": SITES_LIMIT, "near_ride": target["id"]})
+            found = await self.tool("find_sites", {"limit": SITES_LIMIT, "near_ride": target["id"], **size})
             if found["near"] is None:   # e.g. a ride whose track was removed
                 note = f" I don't know where {target['name']} is, so I picked a good spot instead."
                 target = found = None
-        policy = "near_target" if target else await self.choose_policy(text)
+        policy = "near_target" if target else RIDE_POLICY if rtype.size > 1 else await self.choose_policy(text)
         if found is None:
-            found = await self.tool("find_sites", {"limit": SITES_LIMIT, **POLICIES[policy][0]})
+            found = await self.tool("find_sites", {"limit": SITES_LIMIT, **size, **POLICIES[policy][0]})
         sites = rank_sites(found["sites"], policy)
         log.info("build: %s, price %s, policy %s, %d sites", obj["object"], price, policy, len(sites))
         if not sites:
+            if rtype.size > 1:
+                return (f"I found no free, flat {rtype.size}x{rtype.size} spot with a row for the entrance and exit "
+                        f"next to a path. Clear some space or buy land first.")
             return "I found no free, flat spot next to a path that the park owns. Clear some space or buy land first."
 
         error = None
@@ -329,7 +366,8 @@ class Builder:
             return why
 
         where = f"near {target['name']}" if target else POLICY_TEXT.get(policy, "next to a path")
-        p = Proposal(obj, price, req.open != "closed", {k: site[k] for k in ("x", "y", "z", "direction")}, cost, exact,
+        p = Proposal(obj, price, req.open != "closed", {k: site[k] for k in ("x", "y", "z", "direction", "entrance", "exit")
+                                                         if k in site}, cost, exact,
                      where, time.monotonic() + self.cfg.build_proposal_ttl)
         self.pending[name.lower()] = p
         details = ", ".join(x for x in (fmt_price(price, self.currency), "open" if p.open else "closed") if x)
@@ -338,9 +376,12 @@ class Builder:
                 f"Type !yes to build or !no to cancel.")
 
     def build_args(self, obj: dict, price, is_open: bool, site: dict, player: int, dry_run: bool) -> dict:
-        return {"dry_run": dry_run, "object": obj["object"], "ride_type": obj["ride_type"],
+        args = {"dry_run": dry_run, "object": obj["object"], "ride_type": obj["ride_type"],
                 "track_type": RIDE_TYPES[obj["ride_type"]].track_type, "x": site["x"], "y": site["y"], "z": site["z"],
-                "direction": site["direction"], "price": price, "open": is_open, "player": player}
+                "direction": site.get("direction", 0), "price": price, "open": is_open, "player": player}
+        if "entrance" in site:   # flat rides
+            args["entrance"], args["exit"] = site["entrance"], site["exit"]
+        return args
 
     async def parse(self, text: str, objects: list[dict], rides: list[dict]) -> BuildRequest:
         req = None
@@ -356,8 +397,11 @@ class Builder:
         if req is None:
             req = parse_keywords(text)
         exact = exact_object(text, objects, rides)
-        if exact:
-            req = replace(req, kind="stall", category=RIDE_TYPES[exact["ride_type"]].category, object=exact["object"])
+        if exact and exact["ride_type"] in RIDE_TYPES:
+            rtype = RIDE_TYPES[exact["ride_type"]]
+            req = replace(req, kind="flat_ride" if rtype.size > 1 else "stall", category=rtype.category, object=exact["object"])
+        elif exact:   # something it can't build; propose() says so
+            req = replace(req, kind="flat_ride", object=exact["object"])
         return req
 
     async def choose(self, text: str, instructions: str, options: dict[str, str], default: str) -> str:
@@ -376,8 +420,10 @@ class Builder:
     async def choose_object(self, text: str, candidates: list[dict]) -> dict:
         if len(candidates) == 1:
             return candidates[0]
-        options = {o["object"]: f"{o['name']}, a {CATEGORY_NAMES[RIDE_TYPES[o['ride_type']].category]}" for o in candidates}
-        pick = await self.choose(text, "Which stall fits the player's request best?", options, candidates[0]["object"])
+        options = {o["object"]: f"{o['name']}: " + (RIDE_TYPES[o["ride_type"]].about
+                                                    or f"a {CATEGORY_NAMES[RIDE_TYPES[o['ride_type']].category]}")
+                   for o in candidates}
+        pick = await self.choose(text, "Which one fits the player's request best?", options, candidates[0]["object"])
         return next(o for o in candidates if o["object"] == pick)
 
     async def choose_tier(self, text: str, pref: str) -> str:

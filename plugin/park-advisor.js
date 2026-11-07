@@ -15,8 +15,8 @@ var PROTOCOL = 1;
 
 var HELP = "Park Advisor: !ask <question> asks the advisor about the park. " +
     "!reset forgets your conversation. !ping checks the bot. !tool <name> shows raw park data. !help shows this.";
-var HELP_BUILD = " !build <what> proposes a stall (I can build stalls, e.g. !build a cheap burger bar near the Big Dipper), " +
-    "!yes builds it, !no cancels, !undo removes your last build.";
+var HELP_BUILD = " !build <what> proposes a stall or small ride (e.g. !build a cheap burger bar near the Big Dipper, " +
+    "!build a merry-go-round), !yes builds it, !no cancels, !undo removes your last build.";
 
 var listener = null;
 var conn = null;
@@ -316,6 +316,11 @@ var SITE_RADIUS = 5;            // tiles counted for the nearby_* site features
 var MAX_SITES = 100;
 var MAX_PRICE = 20;             // currency; ridesetprice accepts 0..200 internal units
 var BUILD_TIMEOUT_MS = 30000;   // give up on a build whose callbacks never come back
+var STALL_TRACKS = [262, 264];  // flatTrack1x1A, flatTrack1x1B (information kiosk)
+// Square flat rides by track type: footprint size, and the tile trackplace wants as an offset from
+// the footprint's lowest corner (TED.FlatRide.h; a 3x3 ride is placed by its centre). They are
+// always placed with direction 0, which only turns the model.
+var FLAT_TRACKS = { 258: { size: 2, origin: 0 }, 259: { size: 4, origin: 0 }, 266: { size: 3, origin: 1 } };
 
 var buildEnabled = false;       // set by the helper's hello
 var building = null;            // the build in progress: {ride, player}
@@ -405,10 +410,78 @@ function countNear(x, y, g) {
     return n;
 }
 
+// Free land under a whole size x size footprint at height z.
+function freeRect(x0, y0, size, z, free) {
+    for (var dx = 0; dx < size; dx++) {
+        for (var dy = 0; dy < size; dy++) {
+            var s = free(x0 + dx, y0 + dy);
+            if (!s || s.baseZ !== z) return false;
+        }
+    }
+    return true;
+}
+
+// Sites for a square flat ride: the footprint, then one row of free land toward a path, where the
+// entrance and the exit go next to each other. Unlike a stall, they face the ride, with the path
+// behind them: only then does the game join the path to them. From the path tiles outward, like stalls.
+function flatSites(paths, size, free) {
+    var byRect = {};
+    paths.forEach(function (p) {
+        for (var d = 0; d < 4; d++) {
+            var dx = DELTA[d][0], dy = DELTA[d][1];
+            var ex = p.x - dx, ey = p.y - dy;              // the entrance, with p behind it
+            var e = free(ex, ey);
+            if (!e || e.baseZ !== p.z) continue;
+            var ax = Math.abs(dy), ay = Math.abs(dx);      // along the ride's side
+            for (var k = 0; k < size; k++) {               // the entrance is the k-th tile along that side
+                var x0 = Math.min(ex - dx, ex - dx * size) - k * ax;
+                var y0 = Math.min(ey - dy, ey - dy * size) - k * ay;
+                var key = x0 * 100000 + y0;
+                if (byRect[key] || !freeRect(x0, y0, size, p.z, free)) continue;
+                var exit = null;
+                for (var off = 1; off < size && !exit; off++) {   // the nearest other tile on that side
+                    [k - off, k + off].forEach(function (j) {
+                        if (exit || j < 0 || j >= size) return;
+                        var xx = ex + (j - k) * ax, xy = ey + (j - k) * ay, xs = free(xx, xy);
+                        if (xs && xs.baseZ === p.z && flatPath(xx + dx, xy + dy, p.z)) exit = { x: xx, y: xy, direction: (d + 2) % 4 };
+                    });
+                }
+                if (!exit) continue;
+                byRect[key] = { x: x0, y: y0, z: p.z, size: size, entrance: { x: ex, y: ey, direction: (d + 2) % 4 }, exit: exit,
+                    path: { x: p.x, y: p.y }, path_neighbors: p.n };
+            }
+        }
+    });
+    return Object.keys(byRect).map(function (k) { return byRect[k]; });
+}
+
+// Re-check a flat ride site just before building; null if fine, else why not.
+function flatSiteProblem(args, size) {
+    if (!freeRect(args.x, args.y, size, args.z, freeLand)) return "that spot is not free any more";
+    var ends = [args.entrance, args.exit];
+    for (var i = 0; i < 2; i++) {
+        var t = ends[i], d = t && DELTA[t.direction];
+        if (!d) return "the entrance and exit need a direction";
+        var front = { x: t.x + d[0], y: t.y + d[1] };   // the ride tile it faces
+        var land = freeLand(t.x, t.y);
+        if (!land || land.baseZ !== args.z) return "that spot is not free any more";
+        if (front.x < args.x || front.y < args.y || front.x >= args.x + size || front.y >= args.y + size) {
+            return "the entrance and exit must face the ride";
+        }
+        if (!flatPath(t.x - d[0], t.y - d[1], args.z)) return "there is no path behind the entrance or exit";
+    }
+    if (args.entrance.x === args.exit.x && args.entrance.y === args.exit.y) return "the entrance and exit need two tiles";
+    return null;
+}
+
 var SITE_SORT = ["dist_near", "dist_park_entrance", "dist_nearest_ride", "nearby_guests", "nearby_stalls", "path_neighbors"];
 
 function findSites(args) {
-    if ((args.width || 1) !== 1 || (args.height || 1) !== 1) throw new Error("only 1x1 sites are supported");
+    var size = args.width || 1;
+    if ((args.height || 1) !== size) throw new Error("only square sites are supported");
+    if (size !== 1 && !Object.keys(FLAT_TRACKS).some(function (t) { return FLAT_TRACKS[t].size === size; })) {
+        throw new Error("no ride has a " + size + "x" + size + " footprint");
+    }
     var limit = Math.max(1, Math.min(MAX_SITES, Math.floor(Number(args.limit) || 40)));
     var near = null;
     if (args.near_ride !== undefined && args.near_ride !== null) {
@@ -434,7 +507,14 @@ function findSites(args) {
             }
         }
     }
-    paths.forEach(function (p) {
+    var seen = {};
+    function free(x, y) {   // freeLand, read once per tile: footprints overlap a lot
+        var k = x * 100000 + y;
+        if (!(k in seen)) seen[k] = freeLand(x, y);
+        return seen[k];
+    }
+    var sites = size > 1 ? flatSites(paths, size, free) : [];
+    if (size === 1) paths.forEach(function (p) {
         for (var d = 0; d < 4; d++) {
             var sx = p.x - DELTA[d][0], sy = p.y - DELTA[d][1];   // the stall at sx,sy faces d, toward p
             var s = freeLand(sx, sy);
@@ -446,7 +526,7 @@ function findSites(args) {
             }
         }
     });
-    var sites = Object.keys(byTile).map(function (k) { return byTile[k]; });
+    if (size === 1) sites = Object.keys(byTile).map(function (k) { return byTile[k]; });
     map.rides.forEach(function (r) {
         var t = rideTile(r);
         if (t) (r.classification === "ride" ? rides : stalls).push(t);
@@ -457,18 +537,20 @@ function findSites(args) {
     var guestGrid = grid(guests), stallGrid = grid(stalls);
 
     sites.forEach(function (s) {
+        var cx = s.x + ((size - 1) >> 1), cy = s.y + ((size - 1) >> 1);   // features at the middle
         s.features = compact({
-            dist_near: near ? Math.abs(near.x - s.x) + Math.abs(near.y - s.y) : null,
-            dist_park_entrance: nearest(s.x, s.y, entrances),
-            dist_nearest_ride: nearest(s.x, s.y, rides),
-            nearby_guests: countNear(s.x, s.y, guestGrid),
-            nearby_stalls: countNear(s.x, s.y, stallGrid),
+            dist_near: near ? Math.abs(near.x - cx) + Math.abs(near.y - cy) : null,
+            dist_park_entrance: nearest(cx, cy, entrances),
+            dist_nearest_ride: nearest(cx, cy, rides),
+            nearby_guests: countNear(cx, cy, guestGrid),
+            nearby_stalls: countNear(cx, cy, stallGrid),
             path_neighbors: s.path_neighbors
         });
         delete s.path_neighbors;
     });
-    // Ascending distances, descending counts; ties by position so results are stable.
-    var desc = sort && sort.indexOf("dist_") !== 0;
+    // Ascending distances, descending counts unless `desc` says otherwise; ties by position so
+    // results are stable.
+    var desc = args.desc !== undefined ? !!args.desc : !!sort && sort.indexOf("dist_") !== 0;
     sites.sort(function (a, b) {
         if (sort) {
             var fa = a.features[sort], fb = b.features[sort];
@@ -498,6 +580,8 @@ function buildable(args) {
         cash: money(park.cash),
         no_money: park.getFlag("noMoney"),
         max_price: MAX_PRICE,
+        // Parks that charge for entry keep ride tickets free, unless prices are unlocked.
+        ride_prices: park.getFlag("freeParkEntry") || park.getFlag("unlockAllPrices"),
         currency: currencyAffixes(),
         objects: objects
     };
@@ -535,16 +619,33 @@ function checkBuild(args) {
     if (obj.rideType[0] !== args.ride_type) throw new Error(args.object + " is not ride type " + args.ride_type);
     var price = Number(args.price);
     if (args.price !== null && !(price >= 0 && price <= MAX_PRICE)) throw new Error("price must be between 0 and " + MAX_PRICE);
-    var site = stallSite(args.x, args.y);
-    if (!site || site.z !== args.z) throw new Error("that spot is not free any more");
-    var d = DELTA[args.direction];
-    if (!d || !flatPath(args.x + d[0], args.y + d[1], args.z)) throw new Error("there is no path in front of that spot");
+    var flat = FLAT_TRACKS[args.track_type];
+    if (flat) {
+        var problem = flatSiteProblem(args, flat.size);
+        if (problem) throw new Error(problem);
+    } else if (STALL_TRACKS.indexOf(args.track_type) >= 0) {
+        var site = stallSite(args.x, args.y);
+        if (!site || site.z !== args.z) throw new Error("that spot is not free any more");
+        var d = DELTA[args.direction];
+        if (!d || !flatPath(args.x + d[0], args.y + d[1], args.z)) throw new Error("there is no path in front of that spot");
+    } else {
+        throw new Error("track type " + args.track_type + " is not supported");
+    }
     return obj;
 }
 
+// The station style for new rides' entrances: the plain one if the park has it.
+function stationStyle() {
+    var objs = objectManager.getAllObjects("station");
+    for (var i = 0; i < objs.length; i++) if (objs[i].identifier === "rct2.station.plain") return objs[i].index;
+    return 0;
+}
+
 function trackArgs(args, ride) {
+    var flat = FLAT_TRACKS[args.track_type];
+    var o = flat ? flat.origin : 0;
     return {
-        x: args.x * 32, y: args.y * 32, z: args.z, direction: args.direction, ride: ride,
+        x: (args.x + o) * 32, y: (args.y + o) * 32, z: args.z, direction: flat ? 0 : args.direction, ride: ride,
         trackType: args.track_type, rideType: args.ride_type,
         brakeSpeed: 0, colour: 0, seatRotation: 4, trackPlaceFlags: 0, isFromTrackDesign: false
     };
@@ -552,10 +653,13 @@ function trackArgs(args, ride) {
 
 // Without a ride of the same type to borrow, the game cannot query track placement (see the
 // spike), so the cost stays unknown and the helper estimates it.
-function dryRunBuild(args, obj, done) {
-    var createArgs = { rideType: args.ride_type, rideObject: obj.index, entranceObject: 0, colour1: 0, colour2: 0,
+function createArgs(args, obj) {
+    return { rideType: args.ride_type, rideObject: obj.index, entranceObject: stationStyle(), colour1: 0, colour2: 0,
         inspectionInterval: 2 };
-    context.queryAction("ridecreate", createArgs, function (r) {
+}
+
+function dryRunBuild(args, obj, done) {
+    context.queryAction("ridecreate", createArgs(args, obj), function (r) {
         if (r.error) return done(new Error(resultError(r)));
         var same = map.rides.filter(function (x) { return x.type === args.ride_type; })[0];
         if (!same) return done(null, { dry_run: true, cost: null, cash: money(park.cash) });
@@ -566,8 +670,9 @@ function dryRunBuild(args, obj, done) {
     });
 }
 
-// ridecreate -> trackplace -> ridesetprice -> ridesetstatus, each in the previous callback
-// (callbacks do not come back in call order). Any failure after ridecreate demolishes the ride.
+// ridecreate, then trackplace, the entrance and exit (flat rides), ridesetprice and ridesetstatus,
+// each in the previous step's callback (callbacks do not come back in call order). Any failure
+// after ridecreate demolishes the ride, entrance and exit included.
 function executeBuild(args, obj, player, done) {
     var started = date.ticksElapsed;
     var cost = 0;
@@ -601,22 +706,30 @@ function executeBuild(args, obj, player, done) {
         });
     }
 
-    step("ridecreate", { rideType: args.ride_type, rideObject: obj.index, entranceObject: 0, colour1: 0, colour2: 0,
-        inspectionInterval: 2 }, function (c) {
-        job.ride = c.ride;
-        step("trackplace", trackArgs(args, c.ride), function () {
-            // ATMs and first aid have no price (the helper sends null).
-            var setPrice = args.price === null ? function (name, a, next) { next(); } : step;
-            setPrice("ridesetprice", { ride: c.ride, price: Math.round(Number(args.price) * 10), isPrimaryPrice: true }, function () {
-                step("ridesetstatus", { ride: c.ride, status: args.open === false ? 0 : 1 }, function () {
-                    var ride = map.getRide(c.ride);
-                    log("built " + ride.name + " (ride " + c.ride + ") at " + args.x + "," + args.y + " for " + playerName(player) +
-                        ", cost " + money(cost) + ", took " + (date.ticksElapsed - started) + " ticks, actions ran as player " +
-                        job.player);
-                    finish(null, { ride_id: c.ride, name: ride.name, cost: money(cost), status: ride.status });
-                });
-            });
+    // The steps after ridecreate; their arguments need the new ride's id.
+    var steps = [["trackplace", function (rid) { return trackArgs(args, rid); }]];
+    if (FLAT_TRACKS[args.track_type]) {
+        [args.entrance, args.exit].forEach(function (t, i) {
+            steps.push(["rideentranceexitplace", function (rid) {
+                return { x: t.x * 32, y: t.y * 32, direction: t.direction, ride: rid, station: 0, isExit: i === 1 };
+            }]);
         });
+    }
+    if (args.price !== null) {   // ATMs and first aid have no price (the helper sends null)
+        steps.push(["ridesetprice", function (rid) { return { ride: rid, price: Math.round(Number(args.price) * 10), isPrimaryPrice: true }; }]);
+    }
+    steps.push(["ridesetstatus", function (rid) { return { ride: rid, status: args.open === false ? 0 : 1 }; }]);
+
+    step("ridecreate", createArgs(args, obj), function (c) {
+        job.ride = c.ride;
+        (function run(i) {
+            if (i < steps.length) return step(steps[i][0], steps[i][1](c.ride), function () { run(i + 1); });
+            var ride = map.getRide(c.ride);
+            log("built " + ride.name + " (ride " + c.ride + ") at " + args.x + "," + args.y + " for " + playerName(player) +
+                ", cost " + money(cost) + ", took " + (date.ticksElapsed - started) + " ticks, actions ran as player " +
+                job.player);
+            finish(null, { ride_id: c.ride, name: ride.name, cost: money(cost), status: ride.status });
+        })(0);
     });
 }
 
