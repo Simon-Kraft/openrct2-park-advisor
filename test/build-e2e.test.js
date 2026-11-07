@@ -11,10 +11,11 @@ const { makePark, addWorld, MAP } = require("./fixtures");
 
 const ROOT = path.join(__dirname, "..");
 const PORT = 28780 + Math.floor(Math.random() * 1000);
-const [ALICE, BOB, CAROL, DAVE] = [1, 2, 3, 4];
+const [ALICE, BOB, CAROL, DAVE, ERIN, FRANK] = [1, 2, 3, 4, 5, 6];
 const players = [
     { id: 0, name: "Server", group: 0 }, { id: ALICE, name: "Alice", group: 2 }, { id: BOB, name: "Bob", group: 1 },
-    { id: CAROL, name: "Carol", group: 0 }, { id: DAVE, name: "Dave", group: 2 },
+    { id: CAROL, name: "Carol", group: 0 }, { id: DAVE, name: "Dave", group: 2 }, { id: ERIN, name: "Erin", group: 2 },
+    { id: FRANK, name: "Frank", group: 2 },
 ];
 const groups = [
     { id: 0, name: "Admin", permissions: ["chat", "modify_groups"] }, { id: 1, name: "Guest", permissions: ["chat"] },
@@ -23,7 +24,7 @@ const groups = [
 
 const g = makePark();
 const world = addWorld(g, MAP, { guests: [[9, 4, 3]] });
-const plugin = loadPlugin({ port: PORT, globals: g, actions: world.actions, players, groups });
+let plugin = loadPlugin({ port: PORT, globals: g, actions: world.actions, players, groups });
 let helper = null;
 
 before(async () => {
@@ -85,7 +86,7 @@ test("propose, then !yes builds where many guests walk by, then !undo removes it
 
 test("near a ride, a price wish, and an estimated cost when the park has none of that type yet", async () => {
     assert.equal(await build(ALICE, "a cheap drink stall near the Burger Bar 1"),
-        "Proposal: Drinks Stall at (2,3) near Burger Bar 1, price £0.80, open. Cost about £300. "
+        "Proposal: Drinks Stall at (2,3) near Burger Bar 1, price £0.80, open. Cost about £250. "
         + "Type !yes to build or !no to cancel.");
     assert.equal(await say(ALICE, "!no"), "OK, cancelled.");
     assert.equal(await say(ALICE, "!no"), "You have no proposal waiting.");
@@ -103,7 +104,7 @@ test("near a ride, a price wish, and an estimated cost when the park has none of
 });
 
 test("stalls without a price, and the decision model picking among several", async () => {
-    assert.match(await build(ALICE, "a first aid room"), /^Proposal: First Aid Room at \(9,2\) where many guests walk by, open\. Cost about £300\./);
+    assert.match(await build(ALICE, "a first aid room"), /^Proposal: First Aid Room at \(9,2\) where many guests walk by, open\. Cost about £250\./);
     // Two food stalls are researched; the request's words pick the hot dog stall.
     assert.match(await build(ALICE, "some food, hot dogs maybe"), /^Proposal: Hot Dog Stall at/);
     // Nothing points either way: the first one, at the standard price.
@@ -200,4 +201,24 @@ test("replies come in the request's language, unless the translation loses a num
     assert.equal(await say(ALICE, "!no"), "[xx] OK, cancelled.");
     assert.match(await build(ALICE, "a burger bar"), /^Proposal/);
     assert.equal(await say(ALICE, "!no"), "OK, cancelled.");
+});
+
+test("two players at once get different spots, and their builds queue", async () => {
+    const [a, b] = await Promise.all([build(ERIN, "a burger bar"), build(FRANK, "a burger bar")]);
+    const spot = (t) => t.match(/^Proposal: Burger Bar at \((\d+,\d+)\)/)[1];
+    assert.notEqual(spot(a), spot(b));
+    const [ya, yb] = await Promise.all([say(ERIN, "!yes"), say(FRANK, "!yes")]);
+    assert.match(ya, /^Built Burger Bar \d+ at/);
+    assert.match(yb, /^Built Burger Bar \d+ at/);
+    assert.equal(await say(ERIN, "!undo"), ya.replace(/^Built (Burger Bar \d+) .*/, "Removed $1, the park got £210 back."));
+    assert.match(await say(FRANK, "!undo"), /^Removed Burger Bar \d+/);
+});
+
+test("a game restart drops waiting proposals", async () => {
+    assert.match(await build(ERIN, "a restroom"), /^Proposal/);
+    plugin.close();
+    plugin = loadPlugin({ port: PORT, globals: g, actions: world.actions, players, groups });
+    await plugin.waitFor(() => plugin.logs.some((l) => l.includes("building enabled")), 15000, "reconnect");
+    assert.equal(await say(ERIN, "!yes"), "Your proposal was dropped because the game restarted. Please use !build again.");
+    assert.equal(await say(ERIN, "!yes"), "You have no proposal waiting. Use !build first.");
 });

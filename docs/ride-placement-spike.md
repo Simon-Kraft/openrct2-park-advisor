@@ -162,6 +162,17 @@ Built a merry-go-round and a twist in the copied park. Guests rode the merry-go-
   unlocked; the plugin reports this as `ride_prices` and the helper then leaves the ticket price alone.
 - Not square, so not built yet: ferris wheel, swinging ships, magic carpet (their sizes and entrance sides depend on direction).
 
+## Soak test (observed, milestone 6)
+
+The finished plugin (on a spare port, chat captured instead of sent, player 0 treated as an admin, as the copy runs
+single-player), the real helper and the real models, on the copied park enlarged to 254x254: ten `!build` + `!yes` (five stall
+types, three rides, English and German), then ten `!undo`. All built and opened; afterwards the park had exactly its three rides
+again. A proposal took about 3.6 s (7.4 s in German, one more model call for the translation), `!yes` 0.4 s (3.6 s in German),
+`!undo` 0.4 s. `find_sites` took 52 ms for stalls and 60 ms for 3x3 rides on that map.
+
+Construction costs seen: food stall 300, drinks stall 250, souvenir stall 200, information kiosk 250, toilets 225, first aid
+250, merry-go-round 460, twist 360, spiral slide 330 (the helper's estimates use these).
+
 ## Answers to the plan's open questions (section 9)
 
 1. **Permissions, cash, attribution.** Plugin actions are **not permission-checked**: group permissions are only enforced in

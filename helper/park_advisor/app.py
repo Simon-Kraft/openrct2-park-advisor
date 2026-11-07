@@ -108,6 +108,8 @@ class Advisor:
             log.info("plugin hello: protocol %s, API %s, tools: %s", msg.get("protocol"), msg.get("api"), ", ".join(tools))
             if self.agent:
                 self.agent.set_available_tools(tools)
+            if self.builder:
+                self.builder.reset()
         elif kind == "ask":
             await self.on_ask(msg["player"], msg.get("name", "?"), msg.get("text", ""))
         elif kind == "reset":

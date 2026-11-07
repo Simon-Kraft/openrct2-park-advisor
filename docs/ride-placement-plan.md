@@ -206,3 +206,24 @@ The plugin type is `remote` (server only). Confirm in the spike which player the
 - **Half-built rides:** plugin rolls back on any failure after `ridecreate`.
 - **Blocking the game thread:** keep `find_sites` bounded and fast; never scan on every chat message, only on `!build`.
 - **Feature should be opt-in:** `BUILD_ENABLED=false` by default; the plugin write tools refuse unless the helper announces the feature on `hello`.
+
+## 11. Status and changes from this plan
+
+All six milestones are implemented; findings are in `docs/ride-placement-spike.md`. Where the code differs from the plan:
+
+- The catalog is keyed by ride type, not by object: `get_buildable` lists every researched object, so custom stalls work too,
+  and the decision model picks among the objects of the wanted category. An exact stall or ride name in the request wins.
+- `build` takes flat arguments (`x`, `y`, `z`, `direction`, `entrance`, `exit`) instead of a `site` object, and the plugin
+  re-checks the site itself. A dry run is a `ridecreate` query plus those checks, plus a `trackplace` query when a ride of the
+  same type exists to borrow (otherwise the cost is the catalog estimate). `demolish` also takes the ride's name, as ride ids
+  are reused.
+- Parsing: the chat model fills the form, with a keyword fallback when it fails. `count` was dropped; `language` was added,
+  and replies are translated into it unless the translation changes a number or command.
+- Flat rides are the square ones (2x2, 3x3, 4x4). Their entrance and exit face the ride, which the plan could not know.
+  Ferris wheels, swinging ships and other long rides are not built yet.
+- Policies: `near_target`, `near_busy` (stall default), `near_junction`, `quiet` (ride default). With
+  `BUILD_CHOOSE_POLICY` the decision model may pick between busy spots and junctions, or "no wish".
+- Hardening: builds and spot choices are serialised, a waiting proposal reserves its tiles, a plugin reconnect drops waiting
+  proposals (players are told on `!yes`), and the undo list keeps the last 100 builds.
+- Still to check on a real hosted server: the build log line shows the player the game ran the actions as (the host, per the
+  source) and how many ticks a build took.

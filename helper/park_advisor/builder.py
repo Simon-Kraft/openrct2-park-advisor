@@ -5,6 +5,7 @@ only fills a small form (BuildRequest), the decision model only picks from short
 plain code finds the site, the price and the action arguments. Without models, an exact stall name
 or a few keywords still work."""
 
+import asyncio
 import json
 import logging
 import re
@@ -31,22 +32,22 @@ class RideType:
 TIERS = ("free", "cheap", "standard", "premium")
 GENTLE_PRICES = dict(zip(TIERS, (0, 0.5, 1.0, 2.0)))
 THRILL_PRICES = dict(zip(TIERS, (0, 1.0, 1.5, 3.0)))
-# Construction costs seen in the game: food stall 300, souvenir stall 200, merry-go-round 460,
-# twist 360. The others are guesses on the safe side. Flat rides are the square ones the plugin can
+# Construction costs as seen in the game (the ATM and the 3x3 rides other than the merry-go-round and
+# twist are guesses on the safe side). The dry run gives the exact cost when the park has one already. Flat rides are the square ones the plugin can
 # place (2x2, 3x3, 4x4); ferris wheels, swinging ships and the like are longer than wide.
 RIDE_TYPES = {
     28: RideType("food", 262, 300, dict(zip(TIERS, (0, 1.0, 1.5, 2.5)))),
-    30: RideType("drink", 262, 300, dict(zip(TIERS, (0, 0.8, 1.2, 2.0)))),
+    30: RideType("drink", 262, 250, dict(zip(TIERS, (0, 0.8, 1.2, 2.0)))),
     32: RideType("souvenir", 262, 200, dict(zip(TIERS, (0, 1.0, 2.0, 3.5)))),
-    35: RideType("info", 264, 300, dict(zip(TIERS, (0, 0.5, 0.8, 1.5)))),
-    36: RideType("toilet", 262, 300, dict(zip(TIERS, (0, 0.1, 0.2, 0.4)))),
+    35: RideType("info", 264, 250, dict(zip(TIERS, (0, 0.5, 0.8, 1.5)))),
+    36: RideType("toilet", 262, 225, dict(zip(TIERS, (0, 0.1, 0.2, 0.4)))),
     45: RideType("atm", 262, 300, None),
-    48: RideType("first_aid", 262, 300, None),
+    48: RideType("first_aid", 262, 250, None),
     33: RideType("gentle", 266, 460, GENTLE_PRICES, 3, "a carousel with horses going round, for small children"),
     49: RideType("gentle", 266, 500, GENTLE_PRICES, 3, "a circus show in a tent"),
     47: RideType("gentle", 266, 500, GENTLE_PRICES, 3, "a spooky walk-through haunted house"),
     41: RideType("gentle", 266, 500, GENTLE_PRICES, 3, "rings that spin guests around"),
-    21: RideType("gentle", 258, 500, GENTLE_PRICES, 2, "a slide winding down a tower"),
+    21: RideType("gentle", 258, 330, GENTLE_PRICES, 2, "a slide winding down a tower"),
     25: RideType("gentle", 259, 600, GENTLE_PRICES, 4, "bumper cars, dodgems or autoscooters that crash into each other"),
     46: RideType("thrill", 266, 360, THRILL_PRICES, 3, "fast spinning arms with cars, a thrill ride"),
 }
@@ -136,6 +137,7 @@ RIDE_POLICY = "quiet"
 PICK_MIN = 0.15   # probability from which the decision model's pick is used
 SITES_LIMIT = 40
 DRY_RUN_TRIES = 5
+MAX_BUILT = 100   # builds remembered for !undo
 HELP_TEXT = "I can build stalls and small rides, e.g. !build a cheap burger bar near the Big Dipper, or !build a merry-go-round."
 STATE = "An OpenRCT2 park advisor bot builds what a player asks for in their theme park.\n"
 
@@ -156,7 +158,8 @@ class Proposal:
     obj: dict             # from get_buildable: object, name, ride_type
     price: float | None
     open: bool
-    site: dict            # x, y, z, direction
+    site: dict            # x, y, z, direction; entrance and exit for rides
+    size: int
     cost: float
     cost_exact: bool
     where: str            # for the reply, e.g. "near Big Dipper"
@@ -228,6 +231,15 @@ def find_ride(near: str | None, text: str, rides: list[dict]) -> dict | None:
     return max(hits, key=lambda r: len(r["name"])) if hits else None
 
 
+def site_tiles(site: dict, size: int) -> set[tuple[int, int]]:
+    """The tiles a build would take: its footprint, plus the entrance and exit of a ride."""
+    tiles = {(site["x"] + dx, site["y"] + dy) for dx in range(size) for dy in range(size)}
+    for end in ("entrance", "exit"):
+        if end in site:
+            tiles.add((site[end]["x"], site[end]["y"]))
+    return tiles
+
+
 def rank_sites(sites: list[dict], policy: str) -> list[dict]:
     """Best site first by the policy's score; ties by position, so the pick is stable."""
     score = POLICIES[policy][1]
@@ -256,6 +268,18 @@ class Builder:
         self.built: list[Built] = []
         self.currency: dict = {}
         self.language: dict[str, str] = {}   # per player, from their last !build
+        self.dropped: set[str] = set()       # players whose proposal a game restart dropped
+        # Builds run one at a time (the plugin refuses a second meanwhile), and choosing a spot and
+        # reserving it for a proposal happen together, so two players never get the same spot.
+        self.lock = asyncio.Lock()
+
+    def reset(self) -> None:
+        """The plugin (re)connected: the game may have restarted with another park, so proposals
+        for spots in the old one are dropped. The undo list stays; demolish checks the ride's name."""
+        if self.pending:
+            log.info("plugin reconnected, dropping %d proposals", len(self.pending))
+        self.dropped |= set(self.pending)
+        self.pending.clear()
 
     async def tool(self, name: str, args: dict):
         res = await self.run_tool(name, args)
@@ -331,6 +355,15 @@ class Builder:
         note = ""
         if req.near and not target:
             note = f" I couldn't find a ride called {req.near}, so I picked a good spot instead."
+        async with self.lock:
+            return await self.place(player, name, text, req, obj, rtype, price, target, note, info)
+
+    async def place(self, player, name, text, req, obj, rtype, price, target, note, info) -> str:
+        """Find, dry-run and reserve a spot, and store the proposal."""
+        now = time.monotonic()
+        for key in [k for k, p in self.pending.items() if p.expires < now or k == name.lower()]:
+            del self.pending[key]
+        taken = set().union(*(site_tiles(p.site, p.size) for p in self.pending.values()))
         found = None
         size = {"width": rtype.size, "height": rtype.size}
         if target:
@@ -341,7 +374,7 @@ class Builder:
         policy = "near_target" if target else RIDE_POLICY if rtype.size > 1 else await self.choose_policy(text)
         if found is None:
             found = await self.tool("find_sites", {"limit": SITES_LIMIT, **size, **POLICIES[policy][0]})
-        sites = rank_sites(found["sites"], policy)
+        sites = [s for s in rank_sites(found["sites"], policy) if not site_tiles(s, rtype.size) & taken]
         log.info("build: %s, price %s, policy %s, %d sites", obj["object"], price, policy, len(sites))
         if not sites:
             if rtype.size > 1:
@@ -367,9 +400,10 @@ class Builder:
 
         where = f"near {target['name']}" if target else POLICY_TEXT.get(policy, "next to a path")
         p = Proposal(obj, price, req.open != "closed", {k: site[k] for k in ("x", "y", "z", "direction", "entrance", "exit")
-                                                         if k in site}, cost, exact,
+                                                         if k in site}, rtype.size, cost, exact,
                      where, time.monotonic() + self.cfg.build_proposal_ttl)
         self.pending[name.lower()] = p
+        self.dropped.discard(name.lower())
         details = ", ".join(x for x in (fmt_price(price, self.currency), "open" if p.open else "closed") if x)
         return (f"Proposal: {obj['name']} at ({site['x']},{site['y']}) {where}, {details}. "
                 f"Cost {'' if exact else 'about '}{fmt_money(cost, self.currency)}.{note} "
@@ -445,6 +479,9 @@ class Builder:
     async def _confirm(self, player: int, name: str) -> str:
         p = self.pending.pop(name.lower(), None)
         if p is None:
+            if name.lower() in self.dropped:
+                self.dropped.discard(name.lower())
+                return "Your proposal was dropped because the game restarted. Please use !build again."
             return "You have no proposal waiting. Use !build first."
         if time.monotonic() > p.expires:
             return "Your proposal expired. Please use !build again."
@@ -459,11 +496,12 @@ class Builder:
         if wait:
             return (f"You can build {self.cfg.build_rate_limit} things per hour. "
                     f"Try again in {int(wait // 60) + 1} minutes.")
-        res = await self.run_tool("build", self.build_args(p.obj, p.price, p.open, p.site, player, False))
+        async with self.lock:
+            res = await self.run_tool("build", self.build_args(p.obj, p.price, p.open, p.site, player, False))
         if not res.get("ok"):
             return f"I couldn't build it: {res.get('error')}. Please use !build again."
         r = res["result"]
-        self.built.append(Built(r["ride_id"], r["name"], name.lower()))
+        self.built = self.built[-(MAX_BUILT - 1):] + [Built(r["ride_id"], r["name"], name.lower())]
         log.info("built %s (ride %s) for %s, cost %s", r["name"], r["ride_id"], name, r["cost"])
         details = ", ".join(x for x in (fmt_price(p.price, self.currency), r["status"]) if x)
         return (f"Built {r['name']} at ({p.site['x']},{p.site['y']}) {p.where}, {details}, for "
@@ -484,7 +522,8 @@ class Builder:
         if not mine:
             return "There is nothing of yours to undo." if not admin else "I haven't built anything to undo."
         last = mine[-1]
-        res = await self.run_tool("demolish", {"ride_id": last.ride_id, "name": last.name})
+        async with self.lock:
+            res = await self.run_tool("demolish", {"ride_id": last.ride_id, "name": last.name})
         if not res.get("ok"):
             if re.search(r"no ride with id|is now called", str(res.get("error"))):
                 self.built.remove(last)
