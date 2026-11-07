@@ -59,6 +59,10 @@ function makeListener(logs) {
  *   port:    bridge port (patched into the plugin source)
  *   globals: extra/override globals (park, map, date, scenario, climate, ...)
  *   players: [{id, name, group}]
+ *   groups:  [{id, name, permissions}]
+ *   actions: game-action engine {query(name, args), execute(name, args)} returning results,
+ *            e.g. from fixtures.addWorld; the harness adds the game's callback timing
+ *   actionPlayer: player id the game reports for our actions (the host, 0)
  */
 function loadPlugin(opts = {}) {
     const logs = [];      // console.log output
@@ -67,16 +71,22 @@ function loadPlugin(opts = {}) {
     const timers = new Set();
     const listeners = [];
     const players = opts.players || [{ id: 0, name: "Server", group: 0 }, { id: 1, name: "Alice", group: 1 }];
+    const groups = opts.groups || [
+        { id: 0, name: "Admin", permissions: ["chat", "kick_player", "modify_groups", "create_ride", "build_ride"] },
+        { id: 1, name: "Guest", permissions: ["chat"] },
+    ];
     let registered = null;
 
     const network = {
         mode: "server",
         players,
+        groups,
         getPlayer(id) {
             const p = players.find((x) => x.id === id);
             if (!p) throw new Error("Invalid player id");
             return p;
         },
+        getGroup(id) { return groups.find((x) => x.id === id) || null; },
         sendMessage(text, to) { sent.push({ to: to ? to.slice() : null, text }); },
         createListener() { const l = makeListener(logs); listeners.push(l); return l; },
         createSocket() { throw new Error("not supported in harness"); },
@@ -95,7 +105,31 @@ function loadPlugin(opts = {}) {
         // Rough stand-in for the game's formatter (only the codes the plugin uses).
         formatString(fmt, value) {
             if (fmt === "{HEIGHT}") return `{BLACK}${Math.round(value * 1.5)}m`;
+            if (fmt === "{CURRENCY2DP}") return `£${(value / 10).toFixed(2)}`;
             throw new Error("harness: unsupported format " + fmt);
+        },
+        // Timing as in the game (docs/ride-placement-spike.md): a query answers at once; an execute
+        // whose query fails answers at once too, otherwise it runs and answers on a later tick.
+        queryAction(name, args, cb) {
+            if (!opts.actions) throw new Error("harness: no actions");
+            const r = opts.actions.query(name, args);
+            if (cb) cb(r);
+        },
+        executeAction(name, args, cb) {
+            if (!opts.actions) throw new Error("harness: no actions");
+            const q = opts.actions.query(name, args);
+            if (q.error) {
+                if (cb) cb(q);
+                return;
+            }
+            context.setTimeout(() => {
+                const r = opts.actions.execute(name, args);
+                if (!r.error) {
+                    const e = { player: opts.actionPlayer ?? 0, type: 0, action: name, isClientOnly: false, args, result: r };
+                    for (const h of hooks["action.execute"] || []) h(e);
+                }
+                if (cb) cb(r);
+            }, 1);
         },
     };
 
@@ -146,4 +180,43 @@ function loadPlugin(opts = {}) {
     };
 }
 
-module.exports = { loadPlugin };
+/**
+ * Minimal NDJSON client playing the helper's role. Resolves once the plugin's hello arrived and,
+ * if `hello` is given, the helper's own hello (e.g. {build: true}) has been sent.
+ */
+function connect(port, hello) {
+    return new Promise((resolve, reject) => {
+        const sock = net.connect(port, "127.0.0.1");
+        const waiting = new Map();
+        let buf = "";
+        let pluginHello = null;
+        sock.on("data", (d) => {
+            buf += d.toString("utf8");
+            let nl;
+            while ((nl = buf.indexOf("\n")) >= 0) {
+                const msg = JSON.parse(buf.slice(0, nl));
+                buf = buf.slice(nl + 1);
+                if (msg.type === "hello") {
+                    pluginHello = msg;
+                    if (hello) sock.write(JSON.stringify({ type: "hello", name: "test", ...hello }) + "\n");
+                    resolve(api);
+                } else if (waiting.has(msg.id)) { waiting.get(msg.id)(msg); waiting.delete(msg.id); }
+            }
+        });
+        sock.on("error", reject);
+        let id = 0;
+        const api = {
+            sock,
+            get hello() { return pluginHello; },
+            call(name, args) {
+                const rid = ++id;
+                return new Promise((res) => {
+                    waiting.set(rid, res);
+                    sock.write(JSON.stringify({ type: "tool_call", id: rid, name, args }) + "\n");
+                });
+            },
+        };
+    });
+}
+
+module.exports = { loadPlugin, connect };

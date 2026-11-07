@@ -19,10 +19,11 @@ class BridgeError(Exception):
 
 
 class Bridge:
-    def __init__(self, host: str, port: int, on_message: Handler):
+    def __init__(self, host: str, port: int, on_message: Handler, hello: dict | None = None):
         self.host = host
         self.port = port
         self.on_message = on_message
+        self.hello = hello or {}  # extra fields for our hello, e.g. {"build": True}
         self._writer: asyncio.StreamWriter | None = None
         self._pending: dict[int, asyncio.Future] = {}
         self._next_id = 0
@@ -49,7 +50,7 @@ class Bridge:
             self._writer = writer
             pinger = asyncio.create_task(self._heartbeat())
             try:
-                await self.send({"type": "hello", "name": "park-advisor-helper"})
+                await self.send({"type": "hello", "name": "park-advisor-helper", **self.hello})
                 await self._read_loop(reader)
             except (OSError, BridgeError, asyncio.IncompleteReadError, ValueError) as e:
                 log.warning("connection lost: %s", e)

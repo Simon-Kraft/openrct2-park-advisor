@@ -4,7 +4,7 @@ A chat bot for OpenRCT2 multiplayer servers. Players type `!ask <question>` in t
 
 There are two parts:
 
-- **`plugin/park-advisor.js`**: a server-side OpenRCT2 plugin (tested on v0.5.6). It handles the chat commands and reads the park through six read-only tools: park summary, ride list, ride details, guests, staff, recent news. It listens on `127.0.0.1:11780`.
+- **`plugin/park-advisor.js`**: a server-side OpenRCT2 plugin (tested on v0.5.6). It handles the chat commands and reads the park through read-only tools: park summary, ride list, ride details, guests, staff, recent news, and for building: buildable stalls, free sites next to paths, player info. Two write tools build and demolish stalls and small rides; only the helper can call them, and only when building is enabled. It listens on `127.0.0.1:11780`.
 - **`helper/`**: a Python program that connects to the plugin and answers questions with an LLM.
 
 ## How questions are answered
@@ -41,6 +41,22 @@ cd helper && ../.venv/bin/python -m park_advisor
 | `!ping` | Check that the bot is running |
 | `!tool <name> [arg]` | Show raw tool output, for debugging |
 | `!help` | List the commands |
+| `!build <what>` | Propose a stall or small ride, e.g. `!build a cheap burger bar near the Big Dipper` (when building is enabled) |
+| `!yes` / `!no` | Build or cancel your proposal (it waits 2 minutes) |
+| `!undo` | Remove the last thing the bot built for you (admins: the last thing it built) |
+
+## Building
+
+With `BUILD_ENABLED=true` players can ask the bot to build stalls (food, drinks, souvenirs, information kiosks, toilets, ATMs, first aid) and small square rides (merry-go-round, twist, circus, haunted house, space rings, spiral slide, bumper cars). It never builds straight away: `!build` replies with a proposal (what, where, price, cost), and only `!yes` builds it. Coasters, paths and scenery are out of scope, and so are rides that aren't square, like the ferris wheel.
+
+1. The chat model fills a small form from the request (category, price wish, a ride to build near, open or closed). If it fails, a few keywords still work, and an exact stall name always does.
+2. The decision model picks between the matching stalls and a price level when the request doesn't say.
+3. Plain code finds the spot: free, flat land the park owns next to a path, near the named ride, else where many guests walk by (stalls) or away from the park entrance (rides, with a row for the entrance and exit). It checks the build with the game first, and the plugin removes a half-built ride if a step fails.
+4. Replies come in the language of the request. The chat model translates them, and a translation that changes a number or a command is replaced by the English text.
+
+With `qwen3:8b` and `tev1:0.8b` a proposal takes about 3 seconds in English and 7 in other languages (one more model call).
+
+Only admins can build, plus the groups in `BUILD_ALLOWED_GROUPS`. Builds are limited per player per hour, by cost, and by a cash reserve the park keeps; see `.env.example`. The plugin's game actions run as the server host, so these checks happen in the helper. What the bot built is remembered only while the helper runs.
 
 ## Tests
 
